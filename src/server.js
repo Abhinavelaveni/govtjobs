@@ -1,4 +1,5 @@
 import express from 'express';
+import { fileURLToPath } from 'node:url';
 import helmet from 'helmet';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
@@ -12,10 +13,13 @@ import { normalizeForSearch, queueForJob } from './matcher.js';
 if (!process.env.JWT_SECRET) throw new Error('JWT_SECRET required');
 
 const app = express();
+const frontendDist = fileURLToPath(new URL('../frontend/dist/', import.meta.url));
+const frontendIndex = fileURLToPath(new URL('../frontend/dist/index.html', import.meta.url));
 app.use(helmet());
 app.use(cors({ origin: process.env.CORS_ORIGIN?.split(',').map(origin => origin.trim()) || true }));
 app.use(express.json({ limit: '100kb' }));
 app.use('/api/auth', rateLimit({ windowMs: 15 * 60e3, max: 30 }));
+app.use(express.static(frontendDist));
 
 const wrap = handler => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(error => {
   console.error(error);
@@ -435,6 +439,11 @@ app.put('/api/admin/settings/interval', admins, wrap(async (req, res) => {
   await schedule();
   res.json({ minutes });
 }));
+
+app.get('*', (req, res, next) => {
+  if (req.path.startsWith('/api/')) return next();
+  res.sendFile(frontendIndex);
+});
 
 let task;
 async function schedule() {
