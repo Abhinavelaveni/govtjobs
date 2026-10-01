@@ -2,8 +2,8 @@ import React, { createContext, useContext, useDeferredValue, useEffect, useRef, 
 import { Link, NavLink, Navigate, Route, Routes, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   ArrowDownUp, ArrowLeft, ArrowRight, Bell, Bookmark, BriefcaseBusiness, Building2, CalendarDays,
-  Check, CheckCircle2, ChevronLeft, ChevronRight, CircleAlert, Clock3, ExternalLink, FileText,
-  Filter, LayoutDashboard, LogIn, LogOut, MapPin, Menu, Moon, Pencil, Plus, Search, Send,
+  Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Clock3, ExternalLink, FileText,
+  Filter, LayoutDashboard, LogIn, LogOut, MapPin, Menu, Moon, Pause, Pencil, Play, Plus, Search, Send,
   Settings2, ShieldCheck, Sun, Trash2, UserRound, Users, Wallet, X, Zap
 } from 'lucide-react';
 import { api, role, saveWaCfg, sendNotification, testWhatsApp, token, waCfg } from './api.js';
@@ -101,9 +101,7 @@ function AuthPage({ initialMode = 'login' }) {
     setError('');
     setBusy(true);
     try {
-      const payload = mode === 'register'
-        ? { ...form, name: form.whatsapp || 'GovJobs User' }
-        : { email: form.email, password: form.password };
+      const payload = mode === 'register' ? form : { email: form.email, password: form.password };
       const result = await api(`/auth/${mode}`, 'POST', payload);
       localStorage.setItem('tok', result.token);
       notify(mode === 'register' ? 'Account created. Set your job-alert preferences next.' : 'Welcome back.');
@@ -123,7 +121,7 @@ function AuthPage({ initialMode = 'login' }) {
       <p className="eyebrow">{mode === 'login' ? 'Your workspace' : 'Get started'}</p>
       <h2>{mode === 'login' ? 'Sign in' : 'Create an account'}</h2>
       <p className="form-intro">{mode === 'login' ? 'Continue to your jobs and alerts.' : 'Create your account, then choose the opportunities you want to see.'}</p>
-      {mode === 'register' && <label>WhatsApp number<input className={inputClass} type="tel" inputMode="numeric" maxLength={10} value={form.whatsapp} onChange={event => setForm({ ...form, whatsapp: event.target.value.replace(/\D/g, '').slice(0, 10) })} required /><small>10-digit Indian mobile number without the country code.</small></label>}
+      {mode === 'register' && <><label>Full name<input className={inputClass} autoComplete="name" value={form.name} onChange={event => setForm({ ...form, name: event.target.value })} required /></label><label>WhatsApp number<input className={inputClass} type="tel" inputMode="numeric" maxLength={10} value={form.whatsapp} onChange={event => setForm({ ...form, whatsapp: event.target.value.replace(/\D/g, '').slice(0, 10) })} required /><small>10-digit Indian mobile number without the country code.</small></label></>}
       <label>Email address<input className={inputClass} type="email" autoComplete="email" value={form.email} onChange={event => setForm({ ...form, email: event.target.value })} required /></label>
       <label>Password<input className={inputClass} type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} minLength={8} value={form.password} onChange={event => setForm({ ...form, password: event.target.value })} required /><small>Use at least 8 characters.</small></label>
       {error && <p className="form-error" role="alert">{error}</p>}
@@ -332,23 +330,102 @@ function PreferencesPage() {
   </div>;
 }
 
+function AccountPage() {
+  const state = useLoad('/auth/me');
+  const notify = useToast();
+  const [form, setForm] = useState(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (state.data) setForm(current => current || { name: state.data.name || '', email: state.data.email || '', password: '' });
+  }, [state.data]);
+  if (state.error) return <ErrorState message={state.error} retry={state.reload} />;
+  if (state.loading || !form) return <Loading label="Loading your account" />;
+  const change = key => event => setForm(current => ({ ...current, [key]: event.target.value }));
+  const save = async event => {
+    event.preventDefault(); setBusy(true);
+    try {
+      await api('/users/account', 'PUT', form);
+      setForm(current => ({ ...current, password: '' }));
+      state.reload();
+      notify('Account settings saved.');
+    } catch (error) { notify(error.message, 'error'); }
+    finally { setBusy(false); }
+  };
+  return <div className="page-stack"><PageHeader eyebrow="Your account" title={form.name} description="Manage the name, email address, and password for your account." />
+    <form className="settings-section schedule-form" onSubmit={save}><label>Full name<input className={inputClass} autoComplete="name" value={form.name} onChange={change('name')} required /></label><label>Email address<input className={inputClass} type="email" autoComplete="email" value={form.email} onChange={change('email')} required /></label><label>New password<input className={inputClass} type="password" autoComplete="new-password" minLength="8" value={form.password} onChange={change('password')} placeholder="Leave blank to keep current password" /></label><button className={buttonClass} disabled={busy}>{busy ? 'Saving…' : 'Save account settings'}<Check size={16} /></button></form>
+  </div>;
+}
+
+function UserMenu({ account, onLogout }) {
+  const [open, setOpen] = useState(false);
+  const menuRef = useRef(null);
+  const state = useLoad(open ? '/notifications' : null, true);
+  useEffect(() => {
+    if (!open) return undefined;
+    const closeOnOutsideClick = event => { if (!menuRef.current?.contains(event.target)) setOpen(false); };
+    const closeOnEscape = event => { if (event.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', closeOnOutsideClick);
+    document.addEventListener('keydown', closeOnEscape);
+    const timer = window.setInterval(state.reload, 60000);
+    return () => {
+      document.removeEventListener('mousedown', closeOnOutsideClick);
+      document.removeEventListener('keydown', closeOnEscape);
+      window.clearInterval(timer);
+    };
+  }, [open]);
+  return <div className="user-menu" ref={menuRef}>
+    <button className="user-menu-trigger" type="button" aria-expanded={open} aria-controls="user-menu-panel" onClick={() => setOpen(value => !value)}>
+      <span className="user-menu-avatar"><UserRound size={17} /></span><span className="user-menu-label"><strong>{account?.name || 'Your account'}</strong><small>{account?.email || 'Account'}</small></span><ChevronDown size={15} />
+    </button>
+    {open && <div className="user-menu-panel" id="user-menu-panel" role="dialog" aria-label="Account and notifications">
+      <div className="user-menu-heading"><strong>{account?.name || 'Your account'}</strong><small>{account?.email}</small></div>
+      <Link className="user-menu-account" to="/account" onClick={() => setOpen(false)}><UserRound size={15} />Account settings</Link>
+      <div className="user-menu-notifications"><div className="user-menu-section-heading"><strong>Recent notifications</strong><Link to="/notifications" onClick={() => setOpen(false)}>View all</Link></div>
+        {state.loading ? <p className="user-menu-empty">Loading notifications…</p> : state.error ? <p className="user-menu-empty">Could not load notifications.</p> : state.data?.length ? <div className="user-menu-list">{state.data.slice(0, 5).map(item => <Link className="user-menu-item" to="/notifications" key={item.id} onClick={() => setOpen(false)}><span><strong>{item.title || 'Job alert'}</strong><small>{relativeTime(item.created_at)}</small></span><StatusBadge status={item.status} /></Link>)}</div> : <p className="user-menu-empty">No notifications yet.</p>}
+      </div>
+      <button className="user-menu-logout" type="button" onClick={onLogout}><LogOut size={15} />Sign out</button>
+    </div>}
+  </div>;
+}
+
 function NotificationsPage({ adminMode = false }) {
   const [status, setStatus] = useState('');
   const [search, setSearch] = useState('');
   const [busy, setBusy] = useState(false);
+  const [sendingIds, setSendingIds] = useState(() => new Set());
+  const [pauseBusy, setPauseBusy] = useState(false);
+  const [pausedState, setPausedState] = useState(null);
   const queueRunRef = useRef(false);
+  const manualIdsRef = useRef(new Set());
+  const sendingIdsRef = useRef(new Set());
   const blockedUntilRef = useRef(new Map());
   const missingKeyWarningRef = useRef(false);
   const path = adminMode ? `/admin/notifications?${new URLSearchParams({ ...(status && { status }), ...(search && { search }) })}` : '/notifications';
   const state = useLoad(path, !adminMode);
+  const holdState = useLoad(adminMode ? '/admin/whatsapp/state' : null, true);
   const notify = useToast();
+  const paused = pausedState ?? Boolean(holdState.data?.paused);
+  const pausedRef = useRef(paused);
+  pausedRef.current = paused;
+  const markSending = (id, sending) => setSendingIds(current => {
+    const next = new Set(current);
+    if (sending) next.add(id);
+    else next.delete(id);
+    return next;
+  });
+  useEffect(() => { if (holdState.data) setPausedState(Boolean(holdState.data.paused)); }, [holdState.data]);
   useEffect(() => {
     const timer = window.setInterval(state.reload, 60000);
     return () => window.clearInterval(timer);
   }, [adminMode]);
+  useEffect(() => {
+    if (!adminMode) return undefined;
+    const timer = window.setInterval(holdState.reload, 15000);
+    return () => window.clearInterval(timer);
+  }, [adminMode]);
   const latestNotification = state.data?.[0];
   useEffect(() => {
-    if (!adminMode || state.loading || state.error || queueRunRef.current) return;
+    if (!adminMode || state.loading || state.error || holdState.loading || holdState.error || paused || queueRunRef.current) return;
     const pending = (state.data || []).filter(item => ['Queued', 'Pending', 'Retrying'].includes(item.status));
     const now = Date.now();
     for (const [number, until] of blockedUntilRef.current) if (until <= now) blockedUntilRef.current.delete(number);
@@ -375,7 +452,9 @@ function NotificationsPage({ adminMode = false }) {
       let sent = 0;
       try {
         for (const notification of pending) {
+          if (pausedRef.current) break;
           const number = notification.whatsapp;
+          if (manualIdsRef.current.has(notification.id)) continue;
           const blockedUntil = blockedUntilRef.current.get(number) || 0;
           if (blockedNumbers.has(number) || blockedUntil > Date.now()) continue;
           const count = sentCounts.get(number) || 0;
@@ -386,6 +465,8 @@ function NotificationsPage({ adminMode = false }) {
             blockedNumbers.add(number);
             continue;
           }
+          sendingIdsRef.current.add(notification.id);
+          markSending(notification.id, true);
           try {
             await sendNotification(notification);
             sent += 1;
@@ -395,26 +476,73 @@ function NotificationsPage({ adminMode = false }) {
             if (/contact rate limit reached/i.test(error.message)) {
               blockedUntilRef.current.set(number, Date.now() + 60 * 60 * 1000);
               blockedNumbers.add(number);
+            } else if (/whatsapp is on hold/i.test(error.message)) {
+              pausedRef.current = true;
+              setPausedState(true);
+              holdState.reload();
+              break;
             } else notify(`Notification ${notification.id} failed: ${error.message}`, 'error');
+          } finally {
+            sendingIdsRef.current.delete(notification.id);
+            markSending(notification.id, false);
           }
-          await new Promise(resolve => setTimeout(resolve, 30000 + Math.random() * 20000));
+          const delayMs = 30000 + Math.random() * 20000;
+          for (let elapsed = 0; elapsed < delayMs && !pausedRef.current; elapsed += 1000) {
+            await new Promise(resolve => setTimeout(resolve, Math.min(1000, delayMs - elapsed)));
+          }
         }
       } finally {
         queueRunRef.current = false;
+        manualIdsRef.current.clear();
         setBusy(false);
         state.reload();
         if (sent) notify(`${sent} notification${sent === 1 ? '' : 's'} sent automatically.`);
       }
     };
     void runQueue();
-  }, [adminMode, state.data, state.loading, state.error]);
+  }, [adminMode, state.data, state.loading, state.error, holdState.loading, holdState.error, paused]);
   const retry = async id => {
     try { await api(`/admin/notifications/${id}/retry`, 'POST'); state.reload(); notify('Notification returned to the send queue.'); }
     catch (error) { notify(error.message, 'error'); }
   };
-  return <div className="page-stack"><PageHeader eyebrow={adminMode ? 'Delivery operations' : 'Your alerts'} title={adminMode ? 'Notifications' : 'Alert history'} description={adminMode ? busy ? 'Sending queued, opted-in alerts automatically.' : 'Queued, opted-in alerts send automatically while this page is open and WhatsApp settings are configured.' : latestNotification ? `Notifications updated ${relativeTime(latestNotification.created_at)}.` : 'Notifications will appear here after a scraper finds matching jobs.'} />
+  const sendManually = async notification => {
+    if (paused || holdState.loading || holdState.error) {
+      notify(paused ? 'WhatsApp is on hold by an administrator.' : 'WhatsApp hold status is unavailable; sending is disabled.', 'error');
+      return;
+    }
+    if (sendingIdsRef.current.has(notification.id)) {
+      notify('This notification is already being sent.', 'error');
+      return;
+    }
+    manualIdsRef.current.add(notification.id);
+    sendingIdsRef.current.add(notification.id);
+    markSending(notification.id, true);
+    try {
+      await sendNotification(notification);
+      notify(`Notification ${notification.id} sent.`);
+    } catch (error) { notify(error.message, 'error'); }
+    finally {
+      if (!queueRunRef.current) manualIdsRef.current.delete(notification.id);
+      sendingIdsRef.current.delete(notification.id);
+      markSending(notification.id, false);
+      state.reload();
+    }
+  };
+  const toggleWhatsAppHold = async () => {
+    setPauseBusy(true);
+    try {
+      const result = await api('/admin/whatsapp/state', 'PUT', { paused: !paused });
+      setPausedState(result.paused);
+      pausedRef.current = result.paused;
+      holdState.reload();
+      notify(result.paused ? 'WhatsApp delivery is on hold.' : 'WhatsApp delivery resumed.');
+    } catch (error) { notify(error.message, 'error'); }
+    finally { setPauseBusy(false); }
+  };
+  return <div className="page-stack"><PageHeader eyebrow={adminMode ? 'Delivery operations' : 'Your alerts'} title={adminMode ? 'Notifications' : 'Alert history'} description={adminMode ? paused ? 'WhatsApp delivery is on hold. Queued alerts will wait until an admin resumes sending.' : busy ? 'Sending queued, opted-in alerts automatically.' : 'Queued, opted-in alerts send automatically while this page is open and WhatsApp settings are configured.' : latestNotification ? `Notifications updated ${relativeTime(latestNotification.created_at)}.` : 'Notifications will appear here after a scraper finds matching jobs.'} action={adminMode && <div className="hold-control"><Badge tone={holdState.error ? 'neutral' : paused ? 'bad' : 'good'}>{holdState.error ? 'Status unavailable' : paused ? 'WhatsApp on hold' : 'WhatsApp active'}</Badge><button className={paused ? buttonClass : mutedButtonClass} disabled={pauseBusy || holdState.loading || Boolean(holdState.error)} onClick={toggleWhatsAppHold}>{paused ? <Play size={16} /> : <Pause size={16} />}{paused ? 'Resume WhatsApp' : 'Pause WhatsApp'}</button></div>} />
+    {adminMode && holdState.error && <ErrorState message={holdState.error} retry={holdState.reload} />}
     {adminMode && <div className="filter-panel compact-filters"><label className="search-field"><Search size={17} /><input placeholder="Search user, number, or job" value={search} onChange={event => setSearch(event.target.value)} /></label><label className="filter-control"><span>Status</span><select value={status} onChange={event => setStatus(event.target.value)}><option value="">All statuses</option>{['Queued', 'Pending', 'Sending', 'Sent', 'Failed', 'Retrying'].map(item => <option key={item}>{item}</option>)}</select></label></div>}
-    {state.loading ? <Loading /> : state.error ? <ErrorState message={state.error} retry={state.reload} /> : state.data?.length ? <div className="table-wrap"><table className="data-table"><thead><tr><th>Job</th>{adminMode && <th>User</th>}<th>WhatsApp</th><th>Status</th><th>Created</th><th>Sent date</th><th /></tr></thead><tbody>{state.data.map(item => <tr key={item.id}><td><strong>{item.title}</strong><small>{item.organization}</small><details className="row-details"><summary>Message and response</summary><p>{item.message}</p>{item.api_response && <pre>{item.api_response}</pre>}{item.error && <p className="form-error">{item.error}</p>}</details></td>{adminMode && <td>{item.name}</td>}<td>{item.whatsapp}</td><td><StatusBadge status={item.status} /></td><td>{prettyDateTime(item.created_at)}</td><td>{item.sent_at ? prettyDateTime(item.sent_at) : 'Not sent'}</td><td>{adminMode && item.status === 'Failed' && <button className="small-action" onClick={() => retry(item.id)}>Retry</button>}</td></tr>)}</tbody></table></div> : <EmptyState icon={Bell} title="No notifications yet" detail={adminMode ? 'Matching opted-in users will appear here when new jobs are added.' : 'Alerts for matching jobs will appear here.'} />}
+    {state.loading ? <Loading /> : state.error ? <ErrorState message={state.error} retry={state.reload} /> : state.data?.length ? <div className="table-wrap"><table className="data-table"><thead><tr><th>Job</th>{adminMode && <th>User</th>}<th>WhatsApp</th><th>Status</th><th>Created</th><th>Sent date</th><th /></tr></thead><tbody>{state.data.map(item => <tr key={item.id}><td><strong>{item.title}</strong><small>{item.organization}</small><details className="row-details"><summary>Message and response</summary><p>{item.message}</p>{item.api_response && <pre>{item.api_response}</pre>}{item.error && <p className="form-error">{item.error}</p>}</details></td>{adminMode && <td>{item.name}</td>}<td>{item.whatsapp}</td><td><StatusBadge status={item.status} /></td><td>{prettyDateTime(item.created_at)}</td><td>{item.sent_at ? prettyDateTime(item.sent_at) : 'Not sent'}</td><td>{adminMode && ['Queued', 'Pending', 'Retrying', 'Failed'].includes(item.status) && <button className="small-action" disabled={paused || holdState.loading || Boolean(holdState.error) || sendingIds.has(item.id)} onClick={() => sendManually(item)}>{sendingIds.has(item.id) ? 'Sending…' : item.status === 'Failed' ? 'Retry now' : 'Send now'}</button>}{adminMode && item.status === 'Failed' && <button className="small-action" onClick={() => retry(item.id)}>Queue retry</button>}</td></tr>)}</tbody></table></div> : <EmptyState icon={Bell} title="No notifications yet" detail={adminMode ? 'Matching opted-in users will appear here when new jobs are added.' : 'Alerts for matching jobs will appear here.'} />}
   </div>;
 }
 
@@ -651,9 +779,9 @@ function WhatsAppSettingsPage() {
     finally { setTesting(false); }
   };
   const field = (label, key, type = 'text', help = '') => <label>{label}<input className={inputClass} type={type} value={form[key] || ''} onChange={event => setForm({ ...form, [key]: event.target.value })} />{help && <small>{help}</small>}</label>;
-  return <div className="page-stack"><PageHeader eyebrow="Administration" title="WhatsApp connection" description="Configure the provider used by this browser to send opted-in notifications." />
-    <div className="whatsapp-layout"><section className="settings-section"><div className="callout-warning"><ShieldCheck size={18} /><p>The API key is stored in this browser session and sent directly to the WhatsApp provider. Use this on a trusted administrator device only.</p></div><div className="settings-fields">{field('API base URL', 'url', 'url', 'The API key is never stored on the application server.')}{field('Session ID', 'sessionId')}{field('API key', 'key', 'password', 'Kept in session storage and cleared when this browser session ends.')}{field('Default template ID', 'tpl')}</div><button className={buttonClass} onClick={save}><Check size={16} />Save WhatsApp settings</button></section>
-      <section className="settings-section test-panel"><SectionHeading title="Send a test message" detail="This sends a real message from the configured WhatsApp session." /><label>Recipient mobile<input className={inputClass} type="tel" inputMode="numeric" maxLength={10} value={phoneNumber} onChange={event => setPhoneNumber(event.target.value)} placeholder="10-digit Indian mobile" /></label><button className={mutedButtonClass} disabled={testing} onClick={test}><Send size={16} />{testing ? 'Sending test…' : 'Send test message'}</button>{testResult && <p className={testResult.toLowerCase().includes('error') || testResult.includes('HTTP') ? 'form-error' : 'helper-note'}>{testResult}</p>}<p className="helper-note">Send requests are made from the browser as specified. If the provider blocks browser CORS requests, use their supported browser endpoint or allowlist this application origin.</p></section>
+  return <div className="page-stack"><PageHeader eyebrow="Administration" title="WhatsApp connection" description="Configure the provider used to send opted-in notifications." />
+    <div className="whatsapp-layout"><section className="settings-section"><div className="callout-warning"><ShieldCheck size={18} /><p>The API key is kept in this browser session and sent to the application server only when you test or send a message. Use a trusted administrator device.</p></div><div className="settings-fields">{field('API base URL', 'url', 'url', 'Use waapi.hybridnet.in; a base path or full send-text endpoint is accepted.')}{field('Session ID', 'sessionId')}{field('API key', 'key', 'password', 'Kept in session storage and cleared when this browser session ends.')}{field('Default template ID', 'tpl')}</div><button className={buttonClass} onClick={save}><Check size={16} />Save WhatsApp settings</button></section>
+      <section className="settings-section test-panel"><SectionHeading title="Send a test message" detail="This sends a real message from the configured WhatsApp session." /><label>Recipient mobile<input className={inputClass} type="tel" inputMode="numeric" maxLength={10} value={phoneNumber} onChange={event => setPhoneNumber(event.target.value)} placeholder="10-digit Indian mobile" /></label><button className={mutedButtonClass} disabled={testing} onClick={test}><Send size={16} />{testing ? 'Sending test…' : 'Send test message'}</button>{testResult && <p className={/error|http|hold|failed/i.test(testResult) ? 'form-error' : 'helper-note'}>{testResult}</p>}<p className="helper-note">Requests are proxied through the authenticated application server. Confirm the WhatsApp session is online and the recipient number is valid.</p></section>
     </div>
   </div>;
 }
@@ -675,7 +803,7 @@ function SettingsPage() {
 
 const userLinks = [
   ['/', 'Overview', LayoutDashboard], ['/jobs', 'Government jobs', BriefcaseBusiness], ['/saved', 'Saved jobs', Bookmark],
-  ['/categories', 'Categories', Filter], ['/notifications', 'Alert history', Bell], ['/preferences', 'Preferences', Settings2]
+  ['/categories', 'Categories', Filter], ['/notifications', 'Alert history', Bell], ['/preferences', 'Preferences', Settings2], ['/account', 'Your account', UserRound]
 ];
 const adminLinks = [
   ['/admin', 'Overview', LayoutDashboard], ['/admin/jobs', 'Job notices', BriefcaseBusiness], ['/admin/categories', 'Categories', Filter],
@@ -688,6 +816,7 @@ function AppContent() {
   const isSignedIn = Boolean(token());
   const userRole = role();
   const adminMode = isSignedIn && userRole === 'admin';
+  const account = useLoad(isSignedIn ? '/auth/me' : null);
   const navigate = useNavigate();
   const [dark, setDark] = useState(() => localStorage.getItem('govjobs_theme') === 'dark');
   useEffect(() => { document.documentElement.classList.toggle('dark', dark); localStorage.setItem('govjobs_theme', dark ? 'dark' : 'light'); }, [dark]);
@@ -701,16 +830,16 @@ function AppContent() {
       <div className="workspace-label">{adminMode ? 'ADMIN WORKSPACE' : isSignedIn ? 'YOUR WORKSPACE' : 'RECRUITMENT BOARD'}</div>
       <nav className="side-nav">{navigation.map(([path, label, Icon]) => <NavLink key={path} to={path} end={path === '/'} onClick={() => setMobileOpen(false)} className={({ isActive }) => `side-link ${isActive ? 'side-link-active' : ''}`}><Icon size={18} strokeWidth={1.8} /><span>{label}</span></NavLink>)}</nav>
       {!isSignedIn && <div className="sidebar-signin"><p>Personalize your job board and save notices that interest you.</p><Link className={buttonClass} to="/login">Sign in <LogIn size={16} /></Link></div>}
-      {isSignedIn && <div className="sidebar-bottom"><div className="user-mini"><span><UserRound size={18} /></span><div><strong>{adminMode ? 'Administrator' : 'Your account'}</strong><small>{adminMode ? 'Admin access' : 'Job seeker'}</small></div></div><button className="side-link logout-link" onClick={logout}><LogOut size={17} /><span>Sign out</span></button></div>}
+      {isSignedIn && <div className="sidebar-bottom"><Link className="user-mini" to="/account"><span><UserRound size={18} /></span><div><strong>{account.data?.name || (adminMode ? 'Administrator' : 'Your account')}</strong><small>{account.data?.email || (adminMode ? 'Admin access' : 'Job seeker')}</small></div></Link><button className="side-link logout-link" onClick={logout}><LogOut size={17} /><span>Sign out</span></button></div>}
     </aside>
     {mobileOpen && <button className="mobile-scrim" aria-label="Close navigation" onClick={() => setMobileOpen(false)} />}
-    <div className="main-shell"><header className="topbar"><button className="mobile-menu icon-button" aria-label="Open navigation" onClick={() => setMobileOpen(!mobileOpen)}><Menu size={19} /></button><div className="breadcrumb"><span>{adminMode ? 'Administration' : 'Recruitment board'}</span><ArrowRight size={13} /><strong>India</strong></div><div className="topbar-actions"><span className="service-status"><span />MongoDB connected</span><button className="icon-button theme-button" aria-label={dark ? 'Switch to light theme' : 'Switch to dark theme'} title={dark ? 'Switch to light theme' : 'Switch to dark theme'} onClick={() => setDark(!dark)}>{dark ? <Sun size={18} /> : <Moon size={18} />}</button>{!isSignedIn && <Link className="top-signin" to="/login">Sign in <ArrowRight size={15} /></Link>}</div></header>
+    <div className="main-shell"><header className="topbar"><button className="mobile-menu icon-button" aria-label="Open navigation" onClick={() => setMobileOpen(!mobileOpen)}><Menu size={19} /></button><div className="breadcrumb"><span>{adminMode ? 'Administration' : 'Recruitment board'}</span><ArrowRight size={13} /><strong>India</strong></div><div className="topbar-actions">{adminMode && <span className="service-status"><span />MongoDB connected</span>}{isSignedIn && <UserMenu account={account.data} onLogout={logout} />}<button className="icon-button theme-button" aria-label={dark ? 'Switch to light theme' : 'Switch to dark theme'} title={dark ? 'Switch to light theme' : 'Switch to dark theme'} onClick={() => setDark(!dark)}>{dark ? <Sun size={18} /> : <Moon size={18} />}</button>{!isSignedIn && <Link className="top-signin" to="/login">Sign in <ArrowRight size={15} /></Link>}</div></header>
       <main className="main-content"><Routes>
         <Route path="/" element={isSignedIn ? adminMode ? <AdminDashboard /> : <DashboardPage /> : <JobsPage />} />
         <Route path="/login" element={isSignedIn ? <Navigate to="/" replace /> : <AuthPage initialMode="login" />} />
         <Route path="/register" element={isSignedIn ? <Navigate to="/" replace /> : <AuthPage initialMode="register" />} />
         <Route path="/jobs" element={<JobsPage />} /><Route path="/jobs/:id" element={<JobDetailPage />} /><Route path="/categories" element={<CategoriesPage />} />
-        <Route path="/saved" element={protectedElement(<SavedJobsPage />)} /><Route path="/preferences" element={protectedElement(<PreferencesPage />)} /><Route path="/notifications" element={protectedElement(<NotificationsPage />)} />
+        <Route path="/saved" element={protectedElement(<SavedJobsPage />)} /><Route path="/preferences" element={protectedElement(<PreferencesPage />)} /><Route path="/account" element={protectedElement(<AccountPage />)} /><Route path="/notifications" element={protectedElement(<NotificationsPage />)} />
         <Route path="/admin" element={adminElement(<AdminDashboard />)} /><Route path="/admin/jobs" element={adminElement(<AdminJobsPage />)} /><Route path="/admin/categories" element={adminElement(<AdminCategoriesPage />)} />
         <Route path="/admin/sources" element={adminElement(<AdminSourcesPage />)} /><Route path="/admin/users" element={adminElement(<AdminUsersPage />)} /><Route path="/admin/notifications" element={adminElement(<NotificationsPage adminMode />)} />
         <Route path="/admin/whatsapp" element={adminElement(<WhatsAppSettingsPage />)} /><Route path="/admin/templates" element={adminElement(<TemplatesPage />)} /><Route path="/admin/settings" element={adminElement(<SettingsPage />)} />

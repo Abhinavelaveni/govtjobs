@@ -6,10 +6,26 @@ export const role = () => {
   } catch { return null; }
 };
 export async function api(path, method = 'GET', body) {
-  const r = await fetch('/api' + path, { method, headers: { 'Content-Type': 'application/json', ...(token() && { Authorization: 'Bearer ' + token() }) }, body: body === undefined ? undefined : JSON.stringify(body) });
-  const d = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(d.error || r.statusText);
-  return d;
+  const retryDelays = [250, 500, 1000, 1500, 2000, 2000];
+  const retryable = method.toUpperCase() === 'GET';
+  const options = { method, headers: { 'Content-Type': 'application/json', ...(token() && { Authorization: 'Bearer ' + token() }) }, body: body === undefined ? undefined : JSON.stringify(body) };
+  for (let attempt = 0; ; attempt += 1) {
+    let response;
+    try {
+      response = await fetch('/api' + path, options);
+    } catch (error) {
+      if (!retryable || attempt >= retryDelays.length) throw error;
+      await new Promise(resolve => setTimeout(resolve, retryDelays[attempt]));
+      continue;
+    }
+    const data = await response.json().catch(() => ({}));
+    if (response.ok) return data;
+    if (retryable && response.status >= 500 && attempt < retryDelays.length) {
+      await new Promise(resolve => setTimeout(resolve, retryDelays[attempt]));
+      continue;
+    }
+    throw new Error(data.error || response.statusText);
+  }
 }
 export const waCfg = () => ({
   url: localStorage.getItem('wa_api_url') || 'https://waapi.hybridnet.in/api/v1/sessions',
@@ -32,10 +48,8 @@ export const buildUrl = (config, phone, message) => {
 export async function testWhatsApp(config, phone) {
   if (!config.key) throw new Error('Enter the API key first');
   if (!/^[6-9]\d{9}$/.test(phone || '')) throw new Error('Enter a valid 10-digit Indian mobile number');
-  const response = await fetch(buildUrl(config, phone, 'GovJobs Alerts test message. WhatsApp connection is working.'), { method: 'GET' });
-  const detail = await response.text();
-  if (!response.ok) throw new Error(detail || `WhatsApp API returned HTTP ${response.status}`);
-  return detail || 'Test message accepted by the WhatsApp API.';
+  const result = await api('/admin/whatsapp/test', 'POST', { ...config, phone });
+  return result.response || 'Test message accepted by the WhatsApp API.';
 }
 export async function sendNotification(n) {
   const c = waCfg(); if (!c.key) throw new Error('Set the API key in WhatsApp settings first');
@@ -43,22 +57,5 @@ export async function sendNotification(n) {
     await api(`/notifications/${n.id}/status`, 'PUT', { status: 'Failed', error: 'Invalid mobile number' });
     throw new Error(`Notification ${n.id} has an invalid mobile number`);
   }
-  await api(`/notifications/${n.id}/status`, 'PUT', { status: 'Sending' });
-  let response;
-  let detail;
-  try {
-    response = await fetch(buildUrl(c, n.whatsapp, n.message));
-    detail = await response.text();
-  } catch (error) {
-    await api(`/notifications/${n.id}/status`, 'PUT', { status: 'Failed', error: error.message });
-    throw error;
-  }
-  let providerError;
-  try { providerError = JSON.parse(detail); } catch { providerError = null; }
-  const limitHit = providerError?.code === 'per_contact_limit' || /per_contact_limit|messages? to this contact in the last 60 minutes/i.test(detail || '');
-  const accepted = response.ok && !providerError?.error;
-  const status = accepted ? 'Sent' : limitHit ? 'Queued' : 'Failed';
-  const error = accepted ? '' : limitHit ? `Waiting in GovJobs queue for the contact limit to reset${providerError?.retry_after_seconds ? ` (${providerError.retry_after_seconds}s)` : ''}` : `HTTP ${response.status}: ${detail}`;
-  await api(`/notifications/${n.id}/status`, 'PUT', { status, response: detail, error });
-  if (!accepted) throw new Error(limitHit ? 'Contact rate limit reached; notification remains queued in GovJobs.' : `WhatsApp API returned HTTP ${response.status}`);
+  await api(`/admin/notifications/${n.id}/send`, 'POST', c);
 }

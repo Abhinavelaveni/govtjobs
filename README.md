@@ -270,7 +270,7 @@ Prevent the same user from receiving the same job notification multiple times.
 
 # 9. WhatsApp API Integration
 
-Integrate the WhatsApp API **directly from the frontend application**.
+Call the WhatsApp API through an authenticated server endpoint so browser CORS restrictions cannot block delivery. The API key remains in the administrator's browser session and is sent to the application server only for each send; do not persist it on the server or use environment variables for WhatsApp configuration.
 
 Do not use environment variables for the WhatsApp API configuration.
 
@@ -432,6 +432,7 @@ government_job_alert
 ```
 
 The application should allow the administrator to test the WhatsApp API by sending a test message.
+The server accepts a base sessions URL or a full send-text endpoint and restricts requests to `https://waapi.hybridnet.in`.
 
 ---
 

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { matches, normalizeForSearch, whatsappLimitReached } from '../src/matcher.js';
 import { render } from '../src/templates.js';
+import { api } from '../frontend/src/api.js';
 import { PRESETS } from '../src/adapters/presets.js';
 import { fingerprint } from '../src/scraper.js';
 import {
@@ -27,6 +28,33 @@ test('normalizes accents and punctuation for search filters', () => {
 test('whatsapp contact limit blocks more than four sends in an hour', () => {
   assert.equal(whatsappLimitReached(3), false);
   assert.equal(whatsappLimitReached(4), true);
+});
+test('API retries transient GET failures but never replays a POST', async () => {
+  const previousFetch = globalThis.fetch;
+  const previousStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  let getCalls = 0;
+  let postCalls = 0;
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: () => null } });
+  globalThis.fetch = async (_, options) => {
+    if (options.method === 'GET') {
+      getCalls += 1;
+      return getCalls === 1
+        ? { ok: false, status: 502, statusText: 'Bad Gateway', json: async () => ({}) }
+        : { ok: true, status: 200, json: async () => ({ ready: true }) };
+    }
+    postCalls += 1;
+    return { ok: false, status: 502, statusText: 'Bad Gateway', json: async () => ({}) };
+  };
+  try {
+    assert.deepEqual(await api('/health'), { ready: true });
+    await assert.rejects(api('/notifications/1/send', 'POST', {}), /Bad Gateway/);
+    assert.equal(getCalls, 2);
+    assert.equal(postCalls, 1);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousStorage) Object.defineProperty(globalThis, 'localStorage', previousStorage);
+    else delete globalThis.localStorage;
+  }
 });
 
 test('matches eligible user', () => assert.equal(matches(job, pref), true));
