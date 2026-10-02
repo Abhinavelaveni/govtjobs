@@ -6,6 +6,7 @@ import { api, sendNotification, testWhatsApp } from '../frontend/src/api.js';
 import { PRESETS } from '../src/adapters/presets.js';
 import { parseEmploymentNewsJobs, parseGovtJobGuruListing, parseIbpsRecruitmentUpdates, parseRrbCenNotifications } from '../src/adapters/official.js';
 import { fingerprint } from '../src/scraper.js';
+import { nextWhatsAppAttemptAt, retryDelayMs } from '../src/whatsapp-queue.js';
 import {
   parseFreeJobAlertArticle, parseFreeJobAlertListing, parseNtpcOpenAdvertisements,
   parseSahiJobArticle, parseSahiJobLinks, parseSbiCurrentOpenings,
@@ -37,6 +38,18 @@ test('normalizes accents and punctuation for search filters', () => {
 test('whatsapp contact limit blocks more than four sends in an hour', () => {
   assert.equal(whatsappLimitReached(3), false);
   assert.equal(whatsappLimitReached(4), true);
+});
+test('WhatsApp queue waits for the oldest of four recent contact sends to expire', () => {
+  const now = new Date('2026-10-02T12:00:00Z');
+  const attempts = [0, 10, 20, 30].map(minutes => new Date(now.getTime() - minutes * 60_000));
+  assert.equal(nextWhatsAppAttemptAt(attempts.slice(0, 3), now).getTime(), now.getTime());
+  assert.equal(nextWhatsAppAttemptAt(attempts, now).getTime(), attempts[3].getTime() + 60 * 60_000);
+  assert.equal(nextWhatsAppAttemptAt([new Date(now.getTime() - 60 * 60_000)], now).getTime(), now.getTime());
+});
+test('WhatsApp retry backoff grows and is capped at six hours', () => {
+  assert.equal(retryDelayMs(1), 60_000);
+  assert.equal(retryDelayMs(4), 8 * 60_000);
+  assert.equal(retryDelayMs(20), 6 * 60 * 60_000);
 });
 test('API retries transient GET failures but never replays a POST', async () => {
   const previousFetch = globalThis.fetch;

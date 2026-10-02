@@ -9,6 +9,7 @@ import cron from 'node-cron';
 import { closeDB, collection, connectDB, nextId } from './db.js';
 import { runSource, runAll, fingerprint } from './scraper.js';
 import { normalizeForSearch, queueForJob } from './matcher.js';
+import { nextWhatsAppAttemptAt, reserveWhatsAppSlot, retryDelayMs } from './whatsapp-queue.js';
 
 if (!process.env.JWT_SECRET) throw new Error('JWT_SECRET required');
 
@@ -79,9 +80,89 @@ async function requestWhatsApp(config, phoneNumber, message) {
   return {
     accepted,
     limitHit,
+    retryAfterSeconds: Number(providerResult?.retry_after_seconds) || 0,
     response: detail.slice(0, 2000),
     error: accepted ? '' : limitHit ? `Waiting in GovJobs queue for the contact limit to reset${providerResult?.retry_after_seconds ? ` (${providerResult.retry_after_seconds}s)` : ''}` : `HTTP ${response.status}: ${detail}`
   };
+}
+
+let whatsappQueueRunning = false;
+async function processWhatsAppQueue() {
+  if (whatsappQueueRunning) return;
+  whatsappQueueRunning = true;
+  try {
+    const now = new Date();
+    const config = await collection('whatsapp_config').findOne({ id: 1 });
+    if (config?.paused || !config?.key || !config?.sessionId) return;
+
+    await collection('notifications').updateMany(
+      { status: 'Sending', $or: [{ sending_at: { $lt: new Date(now.getTime() - 5 * 60 * 1000) } }, { sending_at: { $exists: false } }] },
+      { $set: { status: 'Queued', retryable: true, next_attempt_at: now, error: 'Recovered an interrupted send; it will be retried.' }, $unset: { sending_at: '' } }
+    );
+    const due = await collection('notifications').find({
+      $and: [
+        { $or: [{ status: { $in: ['Queued', 'Pending', 'Retrying'] } }, { status: 'Failed', retryable: true }] },
+        { $or: [{ next_attempt_at: { $exists: false } }, { next_attempt_at: null }, { next_attempt_at: { $lte: now } }] }
+      ]
+    }).sort({ created_at: 1, id: 1 }).limit(100).toArray();
+
+    for (const notification of due) {
+      const currentConfig = await collection('whatsapp_config').findOne({ id: 1 }, { projection: { paused: 1 } });
+      if (currentConfig?.paused) break;
+      const claimed = await collection('notifications').updateOne(
+        { id: notification.id, status: notification.status },
+        { $set: { status: 'Sending', sending_at: new Date(), error: '' } }
+      );
+      if (!claimed.modifiedCount) continue;
+
+      const preference = await collection('user_preferences').findOne({
+        user_id: notification.user_id, whatsapp: notification.whatsapp,
+        whatsapp_optin: true, opted_out: { $ne: true }
+      });
+      if (!preference || !phone(notification.whatsapp)) {
+        const error = preference ? 'Invalid WhatsApp number' : 'User consent is disabled or the WhatsApp number has changed';
+        await collection('notifications').updateOne({ id: notification.id }, {
+          $set: { status: 'Failed', retryable: false, next_attempt_at: null, error },
+          $unset: { sending_at: '' }
+        });
+        await collection('notification_logs').insertOne({ id: await nextId('notification_logs'), notification_id: notification.id, status: 'Failed', detail: error, at: new Date() });
+        continue;
+      }
+
+      const slot = await reserveWhatsAppSlot(collection('whatsapp_rate_limits'), notification.whatsapp, new Date());
+      if (!slot.reserved) {
+        await collection('notifications').updateOne({ id: notification.id }, {
+          $set: { status: 'Queued', retryable: true, next_attempt_at: slot.nextAt, error: 'Contact rate limit reached; waiting for the hourly limit to reset' },
+          $unset: { sending_at: '' }
+        });
+        continue;
+      }
+
+      let result;
+      try { result = await requestWhatsApp(config, notification.whatsapp, notification.message); }
+      catch (error) { result = { accepted: false, limitHit: false, statusCode: error.status, response: '', error: error.message }; }
+      const sentAt = new Date();
+      const retryCount = Number(notification.retry_count || 0) + 1;
+      const status = result.accepted ? 'Sent' : result.limitHit || result.statusCode === 423 ? 'Queued' : 'Failed';
+      const nextAttemptAt = result.accepted ? null : result.limitHit
+        ? new Date(sentAt.getTime() + Math.max(60, result.retryAfterSeconds || 3600) * 1000)
+        : result.statusCode === 423 ? new Date(sentAt.getTime() + 30_000) : new Date(sentAt.getTime() + retryDelayMs(retryCount));
+      await collection('notifications').updateOne({ id: notification.id }, {
+        $set: {
+          status, retry_count: result.accepted ? Number(notification.retry_count || 0) : retryCount,
+          retryable: !result.accepted, next_attempt_at: nextAttemptAt,
+          api_response: result.response, error: result.error,
+          ...(result.accepted ? { sent_at: sentAt } : {})
+        },
+        $unset: { sending_at: '' }
+      });
+      await collection('notification_logs').insertOne({ id: await nextId('notification_logs'), notification_id: notification.id, status, detail: result.error || result.response, at: sentAt });
+    }
+  } catch (error) {
+    console.error('WhatsApp queue processing failed', error);
+  } finally {
+    whatsappQueueRunning = false;
+  }
 }
 const jobFields = ['title', 'organization', 'department', 'recruitment_no', 'notification_no', 'category', 'gov_level', 'vacancies', 'qualification', 'age_limit', 'salary', 'experience', 'location', 'start_date', 'last_date', 'fee', 'selection_process', 'exam_date', 'published_at', 'notification_url', 'application_url', 'source_id', 'source_url', 'verified', 'featured'];
 const dateValue = value => value ? String(value).slice(0, 10) : null;
@@ -315,7 +396,8 @@ app.get('/api/admin/dashboard', admins, wrap(async (_, res) => {
   const [total_jobs, jobs_today, users, subscribers, sent, failed, pending, active_scrapers] = await Promise.all([
     collection('jobs').countDocuments(), collection('jobs').countDocuments({ created_at: { $gte: today } }), collection('users').countDocuments(),
     collection('user_preferences').countDocuments({ whatsapp_optin: true, opted_out: { $ne: true } }), collection('notifications').countDocuments({ status: 'Sent' }),
-    collection('notifications').countDocuments({ status: 'Failed' }), collection('notifications').countDocuments({ status: { $in: ['Queued', 'Pending', 'Retrying'] } }),
+    collection('notifications').countDocuments({ status: 'Failed', retryable: { $ne: true } }),
+    collection('notifications').countDocuments({ $or: [{ status: { $in: ['Queued', 'Pending', 'Retrying'] } }, { status: 'Failed', retryable: true }] }),
     collection('job_sources').countDocuments({ enabled: true })
   ]);
   res.json({ total_jobs, jobs_today, users, subscribers, sent, failed, pending, active_scrapers });
@@ -462,41 +544,21 @@ app.get('/api/admin/notifications', admins, wrap(async (req, res) => {
   res.json(rows.filter(row => row && (!search || [row.name, row.title, row.whatsapp].some(value => String(value || '').toLowerCase().includes(search)))));
 }));
 app.post('/api/admin/notifications/:id/retry', admins, wrap(async (req, res) => {
-  await collection('notifications').updateOne({ id: positiveId(req.params.id) || 0, status: 'Failed' }, { $set: { status: 'Retrying', error: null } });
+  const result = await collection('notifications').updateOne(
+    { id: positiveId(req.params.id) || 0, status: 'Failed' },
+    { $set: { status: 'Queued', retryable: true, next_attempt_at: new Date(), error: '' } }
+  );
+  if (!result.modifiedCount) return res.status(409).json({ error: 'Notification is not failed or is already being processed' });
   res.json({ ok: true });
 }));
 app.post('/api/admin/notifications/:id/send', admins, wrap(async (req, res) => {
   const id = positiveId(req.params.id) || 0;
-  const notification = await collection('notifications').findOne({ id, status: { $in: ['Queued', 'Pending', 'Retrying', 'Failed'] } });
-  if (!notification) return res.status(409).json({ error: 'Notification is no longer queued' });
-  const preference = await collection('user_preferences').findOne({ user_id: notification.user_id, whatsapp: notification.whatsapp, whatsapp_optin: true, opted_out: { $ne: true } });
-  if (!preference) {
-    await collection('notifications').updateOne({ id, status: notification.status }, { $set: { status: 'Failed', error: 'User consent is disabled or the WhatsApp number has changed' } });
-    return res.status(409).json({ error: 'User consent is disabled or the WhatsApp number has changed' });
-  }
-  const sentSince = new Date(Date.now() - 60 * 60 * 1000);
-  const sentInLastHour = await collection('notifications').countDocuments({ whatsapp: notification.whatsapp, status: 'Sent', sent_at: { $gte: sentSince } });
-  if (sentInLastHour >= 4) {
-    await collection('notifications').updateOne({ id, status: notification.status }, { $set: { status: 'Queued', error: 'Contact rate limit reached; waiting for the hourly limit to reset' } });
-    return res.status(429).json({ error: 'Contact rate limit reached; notification remains queued in GovJobs.' });
-  }
-  const claimed = await collection('notifications').updateOne({ id, status: notification.status }, { $set: { status: 'Sending', error: '' } });
-  if (!claimed.modifiedCount) return res.status(409).json({ error: 'Notification is already being sent' });
-  let result;
-  try {
-    const config = await collection('whatsapp_config').findOne({ id: 1 });
-    result = await requestWhatsApp(config || {}, notification.whatsapp, notification.message);
-  } catch (error) {
-    result = { accepted: false, limitHit: false, statusCode: error.status, response: '', error: error.message };
-  }
-  const status = result.accepted ? 'Sent' : result.limitHit || result.statusCode === 423 ? 'Queued' : 'Failed';
-  await collection('notifications').updateOne({ id }, { $set: {
-    status, api_response: result.response, error: result.error,
-    ...(result.accepted ? { sent_at: new Date() } : {})
-  } });
-  await collection('notification_logs').insertOne({ id: await nextId('notification_logs'), notification_id: id, status, detail: result.error || result.response, at: new Date() });
-  if (!result.accepted) return res.status(result.limitHit ? 429 : result.statusCode || 502).json({ error: result.limitHit ? 'Contact rate limit reached; notification remains queued in GovJobs.' : result.error || 'WhatsApp send failed' });
-  res.json({ status, response: result.response });
+  const queued = await collection('notifications').updateOne(
+    { id, status: { $in: ['Queued', 'Pending', 'Retrying', 'Failed'] } },
+    { $set: { status: 'Queued', retryable: true, next_attempt_at: new Date(), error: '' } }
+  );
+  if (!queued.modifiedCount) return res.status(409).json({ error: 'Notification is no longer queued' });
+  res.status(202).json({ status: 'Queued' });
 }));
 app.get('/api/admin/whatsapp/state', admins, wrap(async (_, res) => {
   const config = await collection('whatsapp_config').findOne({ id: 1 }, { projection: { paused: 1 } });
@@ -532,6 +594,8 @@ app.put('/api/admin/whatsapp/config', admins, wrap(async (req, res) => {
 app.post('/api/admin/whatsapp/test', admins, wrap(async (req, res) => {
   const phoneNumber = String(req.body.phone || '').replace(/\D/g, '').slice(-10);
   if (!phone(phoneNumber)) return res.status(400).json({ error: 'Enter a valid 10-digit Indian mobile number' });
+  const slot = await reserveWhatsAppSlot(collection('whatsapp_rate_limits'), phoneNumber, new Date());
+  if (!slot.reserved) return res.status(429).json({ error: `Contact rate limit reached; next send is available at ${slot.nextAt.toISOString()}` });
   const config = await collection('whatsapp_config').findOne({ id: 1 });
   let result;
   try { result = await requestWhatsApp(config || {}, phoneNumber, 'GovJobs Alerts test message. WhatsApp connection is working.'); }
@@ -587,12 +651,16 @@ async function schedule() {
 
 process.on('unhandledRejection', error => console.error('unhandled rejection', error));
 await connectDB();
+const whatsappQueueTask = setInterval(() => void processWhatsAppQueue(), 5000);
+whatsappQueueTask.unref();
+void processWhatsAppQueue();
 const server = app.listen(process.env.PORT || 4000, () => {
   console.log(`API up on port ${process.env.PORT || 4000}`);
   schedule().catch(error => console.error('scheduler initialization failed', error));
 });
 process.on('SIGTERM', () => {
   task?.stop();
+  clearInterval(whatsappQueueTask);
   server.close(async () => {
     await closeDB();
     process.exit(0);

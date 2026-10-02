@@ -6,7 +6,7 @@ import {
   Filter, LayoutDashboard, LogIn, LogOut, MapPin, Menu, Moon, Pause, Pencil, Play, Plus, Search, Send,
   Settings2, ShieldCheck, Sun, Trash2, UserRound, Users, Wallet, X, Zap
 } from 'lucide-react';
-import { api, role, saveWaCfg, sendNotification, testWhatsApp, token, waCfg } from './api.js';
+import { api, role, saveWaCfg, testWhatsApp, token, waCfg } from './api.js';
 
 const ToastContext = createContext(() => {});
 const useToast = () => useContext(ToastContext);
@@ -391,19 +391,12 @@ function UserMenu({ account, onLogout }) {
 function NotificationsPage({ adminMode = false }) {
   const [status, setStatus] = useState('');
   const [search, setSearch] = useState('');
-  const [busy, setBusy] = useState(false);
   const [sendingIds, setSendingIds] = useState(() => new Set());
   const [pauseBusy, setPauseBusy] = useState(false);
   const [pausedState, setPausedState] = useState(null);
-  const queueRunRef = useRef(false);
-  const manualIdsRef = useRef(new Set());
-  const sendingIdsRef = useRef(new Set());
-  const blockedUntilRef = useRef(new Map());
-  const missingKeyWarningRef = useRef(false);
   const path = adminMode ? `/admin/notifications?${new URLSearchParams({ ...(status && { status }), ...(search && { search }) })}` : '/notifications';
   const state = useLoad(path, !adminMode);
   const holdState = useLoad(adminMode ? '/admin/whatsapp/state' : null, true);
-  const configState = useLoad(adminMode ? '/admin/whatsapp/config' : null, true);
   const notify = useToast();
   const paused = pausedState ?? Boolean(holdState.data?.paused);
   const pausedRef = useRef(paused);
@@ -416,7 +409,7 @@ function NotificationsPage({ adminMode = false }) {
   });
   useEffect(() => { if (holdState.data) setPausedState(Boolean(holdState.data.paused)); }, [holdState.data]);
   useEffect(() => {
-    const timer = window.setInterval(state.reload, 60000);
+    const timer = window.setInterval(state.reload, 10000);
     return () => window.clearInterval(timer);
   }, [adminMode]);
   useEffect(() => {
@@ -425,106 +418,13 @@ function NotificationsPage({ adminMode = false }) {
     return () => window.clearInterval(timer);
   }, [adminMode]);
   const latestNotification = state.data?.[0];
-  useEffect(() => {
-    if (!adminMode || state.loading || state.error || holdState.loading || holdState.error || configState.loading || configState.error || paused || queueRunRef.current) return;
-    const pending = (state.data || []).filter(item => ['Queued', 'Pending', 'Retrying'].includes(item.status));
-    const now = Date.now();
-    for (const [number, until] of blockedUntilRef.current) if (until <= now) blockedUntilRef.current.delete(number);
-    if (!pending.some(item => (blockedUntilRef.current.get(item.whatsapp) || 0) <= now)) return;
-    if (!configState.data?.keyConfigured) {
-      if (!missingKeyWarningRef.current) notify('Set the WhatsApp API key in WhatsApp settings to enable automatic sending.', 'error');
-      missingKeyWarningRef.current = true;
-      return;
-    }
-    missingKeyWarningRef.current = false;
-    queueRunRef.current = true;
-    const runQueue = async () => {
-      setBusy(true);
-      const sentCounts = new Map();
-      const sentTimes = new Map();
-      for (const item of state.data || []) {
-        if (item.status !== 'Sent' || !item.sent_at) continue;
-        const sentAt = new Date(item.sent_at).getTime();
-        if (!Number.isFinite(sentAt) || now - sentAt > 60 * 60 * 1000) continue;
-        sentCounts.set(item.whatsapp, (sentCounts.get(item.whatsapp) || 0) + 1);
-        sentTimes.set(item.whatsapp, [...(sentTimes.get(item.whatsapp) || []), sentAt]);
-      }
-      const blockedNumbers = new Set();
-      let sent = 0;
-      try {
-        for (const notification of pending) {
-          if (pausedRef.current) break;
-          const number = notification.whatsapp;
-          if (manualIdsRef.current.has(notification.id)) continue;
-          const blockedUntil = blockedUntilRef.current.get(number) || 0;
-          if (blockedNumbers.has(number) || blockedUntil > Date.now()) continue;
-          const count = sentCounts.get(number) || 0;
-          if (count >= 4) {
-            const previousSends = sentTimes.get(number) || [];
-            const cooldownEnd = previousSends.length ? Math.min(...previousSends) + 60 * 60 * 1000 : Date.now() + 60 * 60 * 1000;
-            blockedUntilRef.current.set(number, cooldownEnd);
-            blockedNumbers.add(number);
-            continue;
-          }
-          sendingIdsRef.current.add(notification.id);
-          markSending(notification.id, true);
-          try {
-            await sendNotification(notification);
-            sent += 1;
-            sentCounts.set(number, count + 1);
-            sentTimes.set(number, [...(sentTimes.get(number) || []), Date.now()]);
-          } catch (error) {
-            if (/contact rate limit reached/i.test(error.message)) {
-              blockedUntilRef.current.set(number, Date.now() + 60 * 60 * 1000);
-              blockedNumbers.add(number);
-            } else if (/whatsapp is on hold/i.test(error.message)) {
-              pausedRef.current = true;
-              setPausedState(true);
-              holdState.reload();
-              break;
-            } else notify(`Notification ${notification.id} failed: ${error.message}`, 'error');
-          } finally {
-            sendingIdsRef.current.delete(notification.id);
-            markSending(notification.id, false);
-          }
-          const delayMs = 30000 + Math.random() * 20000;
-          for (let elapsed = 0; elapsed < delayMs && !pausedRef.current; elapsed += 1000) {
-            await new Promise(resolve => setTimeout(resolve, Math.min(1000, delayMs - elapsed)));
-          }
-        }
-      } finally {
-        queueRunRef.current = false;
-        manualIdsRef.current.clear();
-        setBusy(false);
-        state.reload();
-        if (sent) notify(`${sent} notification${sent === 1 ? '' : 's'} sent automatically.`);
-      }
-    };
-    void runQueue();
-  }, [adminMode, state.data, state.loading, state.error, holdState.loading, holdState.error, configState.data, configState.loading, configState.error, paused]);
-  const retry = async id => {
-    try { await api(`/admin/notifications/${id}/retry`, 'POST'); state.reload(); notify('Notification returned to the send queue.'); }
-    catch (error) { notify(error.message, 'error'); }
-  };
   const sendManually = async notification => {
-    if (paused || holdState.loading || holdState.error) {
-      notify(paused ? 'WhatsApp is on hold by an administrator.' : 'WhatsApp hold status is unavailable; sending is disabled.', 'error');
-      return;
-    }
-    if (sendingIdsRef.current.has(notification.id)) {
-      notify('This notification is already being sent.', 'error');
-      return;
-    }
-    manualIdsRef.current.add(notification.id);
-    sendingIdsRef.current.add(notification.id);
     markSending(notification.id, true);
     try {
-      await sendNotification(notification);
-      notify(`Notification ${notification.id} sent.`);
+      await api(`/admin/notifications/${notification.id}/send`, 'POST');
+      notify(`Notification ${notification.id} added to the delivery queue.`);
     } catch (error) { notify(error.message, 'error'); }
     finally {
-      if (!queueRunRef.current) manualIdsRef.current.delete(notification.id);
-      sendingIdsRef.current.delete(notification.id);
       markSending(notification.id, false);
       state.reload();
     }
@@ -540,10 +440,10 @@ function NotificationsPage({ adminMode = false }) {
     } catch (error) { notify(error.message, 'error'); }
     finally { setPauseBusy(false); }
   };
-  return <div className="page-stack"><PageHeader eyebrow={adminMode ? 'Delivery operations' : 'Your alerts'} title={adminMode ? 'Notifications' : 'Alert history'} description={adminMode ? paused ? 'WhatsApp delivery is on hold. Queued alerts will wait until an admin resumes sending.' : busy ? 'Sending queued, opted-in alerts automatically.' : 'Queued, opted-in alerts send automatically while this page is open and WhatsApp settings are configured.' : latestNotification ? `Notifications updated ${relativeTime(latestNotification.created_at)}.` : 'Notifications will appear here after a scraper finds matching jobs.'} action={adminMode && <div className="hold-control"><Badge tone={holdState.error ? 'neutral' : paused ? 'bad' : 'good'}>{holdState.error ? 'Status unavailable' : paused ? 'WhatsApp on hold' : 'WhatsApp active'}</Badge><button className={paused ? buttonClass : mutedButtonClass} disabled={pauseBusy || holdState.loading || Boolean(holdState.error)} onClick={toggleWhatsAppHold}>{paused ? <Play size={16} /> : <Pause size={16} />}{paused ? 'Resume WhatsApp' : 'Pause WhatsApp'}</button></div>} />
+  return <div className="page-stack"><PageHeader eyebrow={adminMode ? 'Delivery operations' : 'Your alerts'} title={adminMode ? 'Notifications' : 'Alert history'} description={adminMode ? paused ? 'WhatsApp delivery is on hold. Queued alerts will wait until an admin resumes sending.' : 'Queued alerts are delivered in the background while WhatsApp settings are configured.' : latestNotification ? `Notifications updated ${relativeTime(latestNotification.created_at)}.` : 'Notifications will appear here after a scraper finds matching jobs.'} action={adminMode && <div className="hold-control"><Badge tone={holdState.error ? 'neutral' : paused ? 'bad' : 'good'}>{holdState.error ? 'Status unavailable' : paused ? 'WhatsApp on hold' : 'WhatsApp active'}</Badge><button className={paused ? buttonClass : mutedButtonClass} disabled={pauseBusy || holdState.loading || Boolean(holdState.error)} onClick={toggleWhatsAppHold}>{paused ? <Play size={16} /> : <Pause size={16} />}{paused ? 'Resume WhatsApp' : 'Pause WhatsApp'}</button></div>} />
     {adminMode && holdState.error && <ErrorState message={holdState.error} retry={holdState.reload} />}
     {adminMode && <div className="filter-panel compact-filters"><label className="search-field"><Search size={17} /><input placeholder="Search user, number, or job" value={search} onChange={event => setSearch(event.target.value)} /></label><label className="filter-control"><span>Status</span><select value={status} onChange={event => setStatus(event.target.value)}><option value="">All statuses</option>{['Queued', 'Pending', 'Sending', 'Sent', 'Failed', 'Retrying'].map(item => <option key={item}>{item}</option>)}</select></label></div>}
-    {state.loading ? <Loading /> : state.error ? <ErrorState message={state.error} retry={state.reload} /> : state.data?.length ? <div className="table-wrap"><table className="data-table"><thead><tr><th>Job</th>{adminMode && <th>User</th>}<th>WhatsApp</th><th>Status</th><th>Created</th><th>Sent date</th><th /></tr></thead><tbody>{state.data.map(item => <tr key={item.id}><td><strong>{item.title}</strong><small>{item.organization}</small><details className="row-details"><summary>Message and response</summary><p>{item.message}</p>{item.api_response && <pre>{item.api_response}</pre>}{item.error && <p className="form-error">{item.error}</p>}</details></td>{adminMode && <td>{item.name}</td>}<td>{item.whatsapp}</td><td><StatusBadge status={item.status} /></td><td>{prettyDateTime(item.created_at)}</td><td>{item.sent_at ? prettyDateTime(item.sent_at) : 'Not sent'}</td><td>{adminMode && ['Queued', 'Pending', 'Retrying', 'Failed'].includes(item.status) && <button className="small-action" disabled={paused || holdState.loading || Boolean(holdState.error) || sendingIds.has(item.id)} onClick={() => sendManually(item)}>{sendingIds.has(item.id) ? 'Sending…' : item.status === 'Failed' ? 'Retry now' : 'Send now'}</button>}{adminMode && item.status === 'Failed' && <button className="small-action" onClick={() => retry(item.id)}>Queue retry</button>}</td></tr>)}</tbody></table></div> : <EmptyState icon={Bell} title="No notifications yet" detail={adminMode ? 'Matching opted-in users will appear here when new jobs are added.' : 'Alerts for matching jobs will appear here.'} />}
+    {state.loading ? <Loading /> : state.error ? <ErrorState message={state.error} retry={state.reload} /> : state.data?.length ? <div className="table-wrap"><table className="data-table"><thead><tr><th>Job</th>{adminMode && <th>User</th>}<th>WhatsApp</th><th>Status</th><th>Created</th><th>Sent date</th><th /></tr></thead><tbody>{state.data.map(item => <tr key={item.id}><td><strong>{item.title}</strong><small>{item.organization}</small><details className="row-details"><summary>Message and response</summary><p>{item.message}</p>{item.api_response && <pre>{item.api_response}</pre>}{item.error && <p className="form-error">{item.error}</p>}</details></td>{adminMode && <td>{item.name}</td>}<td>{item.whatsapp}</td><td><StatusBadge status={item.status} /></td><td>{prettyDateTime(item.created_at)}</td><td>{item.sent_at ? prettyDateTime(item.sent_at) : 'Not sent'}</td><td>{adminMode && ['Queued', 'Pending', 'Retrying', 'Failed'].includes(item.status) && <button className="small-action" disabled={sendingIds.has(item.id)} onClick={() => sendManually(item)}>{sendingIds.has(item.id) ? 'Queueing…' : item.status === 'Failed' ? 'Retry now' : 'Send now'}</button>}</td></tr>)}</tbody></table></div> : <EmptyState icon={Bell} title="No notifications yet" detail={adminMode ? 'Matching opted-in users will appear here when new jobs are added.' : 'Alerts for matching jobs will appear here.'} />}
   </div>;
 }
 

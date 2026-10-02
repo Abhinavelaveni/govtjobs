@@ -39,7 +39,8 @@ export async function queueForJob(job, sourceName) {
       await collection('notifications').insertOne({
         id: await nextId('notifications'), user_id: preference.user_id, job_id: job.id,
         whatsapp: preference.whatsapp, message: render(job, sourceName, tpl?.body),
-        template_id: cfg?.template_id ?? null, status: 'Queued', created_at: new Date()
+        template_id: cfg?.template_id ?? null, status: 'Queued', retry_count: 0,
+        retryable: true, next_attempt_at: new Date(), created_at: new Date()
       });
       n++;
     } catch (error) {
