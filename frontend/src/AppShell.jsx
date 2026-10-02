@@ -13,6 +13,7 @@ const useToast = () => useContext(ToastContext);
 const inputClass = 'field';
 const buttonClass = 'button';
 const mutedButtonClass = 'button button-muted';
+const scrapeIntervals = [...Array.from({ length: 55 }, (_, index) => index + 5), 180, 360];
 
 function ToastProvider({ children }) {
   const [toast, setToast] = useState(null);
@@ -722,7 +723,7 @@ function SettingsPage() {
     catch (error) { notify(error.message, 'error'); }
     finally { setBusy(false); }
   };
-  return <div className="page-stack"><PageHeader eyebrow="Administration" title="Scraper schedule" description="Set how often enabled sources are checked. Each source must have verified selectors before enabling it." />{state.loading ? <Loading /> : state.error ? <ErrorState message={state.error} retry={state.reload} /> : <form className="settings-section schedule-form" onSubmit={save}><label>Run interval (minutes)<input className={inputClass} type="number" min="5" max="59" value={minutes} onChange={event => setMinutes(event.target.value)} required /></label><p className="helper-note">The scheduler supports intervals from 5 to 59 minutes. Scrapes still respect robots.txt and use a delay between pages.</p><button className={buttonClass} disabled={busy}>{busy ? 'Saving…' : 'Save schedule'}<Check size={16} /></button></form>}</div>;
+  return <div className="page-stack"><PageHeader eyebrow="Administration" title="Scraper schedule" description="Set how often enabled sources are checked. Each source must have verified selectors before enabling it." />{state.loading ? <Loading /> : state.error ? <ErrorState message={state.error} retry={state.reload} /> : <form className="settings-section schedule-form" onSubmit={save}><label>Run interval<select className={inputClass} value={minutes} onChange={event => setMinutes(event.target.value)} required>{scrapeIntervals.map(value => <option key={value} value={value}>{value >= 60 ? `${value / 60} hours` : `${value} minutes`}</option>)}</select></label><p className="helper-note">Choose an interval from 5 to 59 minutes, or 3 or 6 hours. Scrapes still respect robots.txt and use a delay between pages.</p><button className={buttonClass} disabled={busy}>{busy ? 'Saving…' : 'Save schedule'}<Check size={16} /></button></form>}</div>;
 }
 
 const userLinks = [

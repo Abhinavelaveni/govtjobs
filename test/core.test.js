@@ -7,6 +7,7 @@ import { PRESETS } from '../src/adapters/presets.js';
 import { parseEmploymentNewsJobs, parseGovtJobGuruListing, parseIbpsRecruitmentUpdates, parseRrbCenNotifications } from '../src/adapters/official.js';
 import { fingerprint } from '../src/scraper.js';
 import { nextWhatsAppAttemptAt, retryDelayMs } from '../src/whatsapp-queue.js';
+import { isSupportedScrapeInterval, normalizeScrapeInterval, scrapeCronExpression } from '../src/scheduler.js';
 import {
   parseFreeJobAlertArticle, parseFreeJobAlertListing, parseNtpcOpenAdvertisements,
   parseSahiJobArticle, parseSahiJobLinks, parseSbiCurrentOpenings,
@@ -33,6 +34,18 @@ test('normalizes accents and punctuation for search filters', () => {
   assert.equal(normalizeForSearch('B.Tech'), 'b tech');
   assert.equal(normalizeForSearch('Maharashtra & Goa'), 'maharashtra and goa');
   assert.equal(normalizeForSearch('Árjuna - engineering'), 'arjuna engineering');
+});
+test('scraper schedule supports minute, three-hour, and six-hour intervals', () => {
+  assert.equal(isSupportedScrapeInterval(5), true);
+  assert.equal(isSupportedScrapeInterval(59), true);
+  assert.equal(isSupportedScrapeInterval(180), true);
+  assert.equal(isSupportedScrapeInterval(360), true);
+  assert.equal(isSupportedScrapeInterval(60), false);
+  assert.equal(isSupportedScrapeInterval(240), false);
+  assert.equal(normalizeScrapeInterval('invalid'), 30);
+  assert.equal(scrapeCronExpression(30), '*/30 * * * *');
+  assert.equal(scrapeCronExpression(180), '0 */3 * * *');
+  assert.equal(scrapeCronExpression(360), '0 */6 * * *');
 });
 
 test('whatsapp contact limit blocks more than four sends in an hour', () => {

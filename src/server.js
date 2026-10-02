@@ -10,6 +10,7 @@ import { closeDB, collection, connectDB, nextId } from './db.js';
 import { runSource, runAll, fingerprint } from './scraper.js';
 import { normalizeForSearch, queueForJob } from './matcher.js';
 import { nextWhatsAppAttemptAt, reserveWhatsAppSlot, retryDelayMs } from './whatsapp-queue.js';
+import { isSupportedScrapeInterval, normalizeScrapeInterval, scrapeCronExpression } from './scheduler.js';
 
 if (!process.env.JWT_SECRET) throw new Error('JWT_SECRET required');
 
@@ -647,10 +648,11 @@ app.delete('/api/admin/templates/:id', admins, wrap(async (req, res) => {
 
 app.get('/api/admin/settings', admins, wrap(async (_, res) => {
   const setting = await collection('settings').findOne({ key: 'scrape_interval_min' });
-  res.json({ scrape_interval_min: Number(setting?.value || 30) });
+  res.json({ scrape_interval_min: normalizeScrapeInterval(setting?.value) });
 }));
 app.put('/api/admin/settings/interval', admins, wrap(async (req, res) => {
-  const minutes = Math.max(5, Math.min(59, Number(req.body.minutes) || 30));
+  const minutes = Number(req.body.minutes);
+  if (!isSupportedScrapeInterval(minutes)) return res.status(400).json({ error: 'Choose an interval from 5-59 minutes, 3 hours, or 6 hours' });
   await collection('settings').updateOne({ key: 'scrape_interval_min' }, { $set: { value: String(minutes) } }, { upsert: true });
   await schedule();
   res.json({ minutes });
@@ -665,8 +667,8 @@ let task;
 async function schedule() {
   task?.stop();
   const setting = await collection('settings').findOne({ key: 'scrape_interval_min' });
-  const minutes = Math.max(5, Math.min(59, Number(setting?.value) || 30));
-  task = cron.schedule(`*/${minutes} * * * *`, () => runAll()
+  const minutes = normalizeScrapeInterval(setting?.value);
+  task = cron.schedule(scrapeCronExpression(minutes), () => runAll()
     .then(wakeWhatsAppQueue)
     .catch(error => console.error('scheduled scrape failed', error)));
 }
