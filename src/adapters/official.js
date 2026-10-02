@@ -23,6 +23,22 @@ const absoluteUrl = (href, base) => {
 };
 
 const cleanText = value => String(value || '').replace(/\s+/g, ' ').trim();
+const monthFirstDate = value => {
+  const match = String(value || '').trim().match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{4})$/);
+  if (!match) return parseSourceDate(value);
+  const [, month, day, year] = match;
+  return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
+};
+const ibpsUpdateDate = value => {
+  const match = cleanText(value).match(/^(\d{1,2})\s+([A-Za-z]{3,9})\s+(\d{2}|\d{4})$/);
+  if (!match) return parseSourceDate(value);
+  const months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+  const month = months.indexOf(match[2].slice(0, 3).toLowerCase());
+  if (month < 0) return parseSourceDate(value);
+  const day = Number(match[1]);
+  const year = match[3].length === 2 ? Number(match[3]) + (Number(match[3]) < 70 ? 2000 : 1900) : Number(match[3]);
+  return `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+};
 const issuerUrl = (href, base, source) => {
   const url = absoluteUrl(href, base);
   if (!url) return null;
@@ -284,4 +300,163 @@ export function parseUpscRecruitmentRss(xml, source) {
   });
 
   return jobs;
+}
+
+export function parseIbpsRecruitmentUpdates(html, source) {
+  const $ = cheerio.load(html);
+  const jobs = [];
+
+  $('tr').each((_, row) => {
+    const anchor = $(row).find('a[href]').first();
+    const title = cleanText(anchor.text());
+    if (!title || !/\b(?:notification|recruitment)\b/i.test(title) || !/\bCRP\b/i.test(title)) return;
+    if (/call letter|admit card|allotment|reserve list|corrigendum|vacanc(?:y|ies)|score|result|exam|training|calendar|fraudulent/i.test(title)) return;
+    const notificationUrl = absoluteUrl(anchor.attr('href'), source.url);
+    if (!notificationUrl) return;
+    const identifier = title.match(/\bCRP[\s-]*(.+)$/i)?.[1]?.trim() || null;
+    const cells = $(row).find('td,th');
+    jobs.push({
+      title,
+      organization: source.config?.organization || 'Institute of Banking Personnel Selection',
+      category: source.config?.category || 'Banking',
+      gov_level: source.config?.gov_level || 'Central',
+      recruitment_no: identifier,
+      notification_no: identifier,
+      notification_url: notificationUrl,
+      application_url: null,
+      source_url: source.config?.sourcePage || source.url,
+      published_at: ibpsUpdateDate($(cells[0]).text())
+    });
+  });
+
+  return jobs;
+}
+
+export function parseEmploymentNewsJobs(html, source, now = new Date()) {
+  const $ = cheerio.load(html);
+  const today = now.toISOString().slice(0, 10);
+  const table = $('table').filter((_, element) => /ORGANISATION/i.test($(element).text()) && /METHOD OF APPOINTMENT/i.test($(element).text())).first();
+  const jobs = [];
+
+  table.find('tr').each((_, row) => {
+    const cells = $(row).find('th,td');
+    if (cells.length < 5 || /ORGANISATION/i.test(cleanText($(cells[1]).text()))) return;
+    const issuedAt = monthFirstDate($(cells[0]).text());
+    const organization = cleanText($(cells[1]).text());
+    const title = cleanText($(cells[2]).text());
+    const appointment = cleanText($(cells[3]).text());
+    const lastDate = parseSourceDate($(cells[4]).text());
+    if (!organization || !title || !lastDate || lastDate <= today || !/recruitment|deputation/i.test(appointment)) return;
+
+    jobs.push({
+      title,
+      organization,
+      category: source.config?.category || 'Other',
+      gov_level: source.config?.gov_level || 'Central',
+      vacancies: null,
+      qualification: [],
+      start_date: null,
+      last_date: lastDate,
+      notification_url: source.url,
+      application_url: null,
+      source_url: source.url,
+      published_at: issuedAt
+    });
+  });
+
+  return jobs;
+}
+
+export function parseRrbCenNotifications(html, source, now = new Date()) {
+  const $ = cheerio.load(html);
+  const today = now.toISOString().slice(0, 10);
+  const recentCutoff = new Date(now);
+  recentCutoff.setDate(recentCutoff.getDate() - 180);
+  const jobs = [];
+  const rows = $('table.cnp_list tbody tr').toArray().map(row => {
+    const cells = $(row).find('td');
+    return {
+      cen: cleanText($(cells[1]).text()),
+      category: cleanText($(cells[2]).text()),
+      title: cleanText($(cells[3]).text()),
+      published_at: dateFromText($(cells[4]).text()),
+      options: $(cells[5]).find('select option').map((__, option) => ({ text: cleanText($(option).text()), href: $(option).attr('value') })).get()
+    };
+  });
+
+  for (const row of rows) {
+    if (!row.cen || !/^notification$/i.test(row.category) || !/detailed.*central(?:is|iz)ed employment notification/i.test(row.title)) continue;
+    if (row.published_at && row.published_at < recentCutoff.toISOString().slice(0, 10)) continue;
+    const english = row.options.find(option => /^english$/i.test(option.text) && option.href);
+    const document = english || row.options.find(option => option.href);
+    const notificationUrl = absoluteUrl(document?.href, source.url);
+    if (!notificationUrl || !/\.pdf(?:\/|$|[?#])/i.test(new URL(notificationUrl).pathname)) continue;
+    const summary = rows.find(item => item.cen === row.cen && /CEN\s+[\w/-]+\s+.+/i.test(item.title));
+    const position = summary?.title.match(/CEN\s+[\w/-]+\s+(.+?)(?:\s*\(Hindi\))?$/i)?.[1];
+    const filename = new URL(notificationUrl).pathname.split('/').find(part => /\.pdf(?:$|\/)/i.test(part));
+    const filenameTitle = filename?.match(/CEN_\d{2}_\d{4}_(.+?)(?:_English|_Hindi)?\.pdf/i)?.[1].replace(/[_-]+/g, ' ');
+    const title = `${position ? cleanText(position) : filenameTitle || 'Railway recruitment'} (CEN ${row.cen})`;
+    jobs.push({
+      title,
+      organization: source.config?.organization || 'Railway Recruitment Board, Chandigarh',
+      category: source.config?.category || 'Railways',
+      gov_level: source.config?.gov_level || 'Central',
+      recruitment_no: row.cen,
+      notification_no: row.cen,
+      last_date: null,
+      notification_url: notificationUrl,
+      application_url: source.config?.applicationUrl || null,
+      source_url: source.config?.sourcePage || source.url,
+      published_at: row.published_at
+    });
+  }
+
+  return jobs;
+}
+
+export function parseGovtJobGuruListing(html, source, now = new Date()) {
+  const $ = cheerio.load(html);
+  const today = now.toISOString().slice(0, 10);
+  const jobs = new Map();
+  const jobLimit = Math.max(1, Math.min(250, Number(source.config?.jobLimit) || 50));
+
+  $('table tr').each((_, row) => {
+    if (jobs.size >= jobLimit) return false;
+    const cells = $(row).find('th,td');
+    if (cells.length < 6) return;
+    const organization = cleanText($(cells[0]).text());
+    const vacancyText = cleanText($(cells[1]).text());
+    const title = cleanText($(cells[2]).text());
+    const qualification = cleanText($(cells[3]).text());
+    const deadlineText = cleanText($(cells[4]).text());
+    const lastDateMatch = deadlineText.match(/(\d{1,2})[-/.](\d{1,2})[-/.](\d{2}|\d{4})/);
+    let lastDate = null;
+    if (lastDateMatch) {
+      const [, day, month, rawYear] = lastDateMatch;
+      const year = rawYear.length === 2 ? `20${rawYear}` : rawYear;
+      lastDate = parseSourceDate(`${day}-${month}-${year}`);
+    }
+    if (!organization || !title || /expired/i.test(deadlineText) || (lastDate && lastDate <= today)) return;
+    const detail = $(row).find('a[href]').filter((__, anchor) => /^detail$/i.test(cleanText($(anchor).text()))).first();
+    const notificationUrl = absoluteUrl(detail.attr('href'), source.url);
+    if (!notificationUrl) return;
+
+    const job = {
+      title,
+      organization,
+      category: source.config?.category || 'Other',
+      gov_level: source.config?.gov_level || null,
+      vacancies: Number(vacancyText.replace(/[^\d]/g, '')) || null,
+      qualification: qualification ? qualification.split(/,\s*/) : [],
+      last_date: lastDate,
+      notification_url: notificationUrl,
+      application_url: null,
+      source_url: source.url,
+      published_at: null
+    };
+    const key = `${organization.toLowerCase()}|${title.toLowerCase()}|${lastDate || notificationUrl}`;
+    if (!jobs.has(key)) jobs.set(key, job);
+  });
+
+  return [...jobs.values()];
 }

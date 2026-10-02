@@ -147,8 +147,10 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .job-source-line a { display: inline-flex; min-width: 0; align-items: center; gap: 3px; color: var(--brand); font-weight: 700; }
 .job-source-line a:hover { text-decoration: underline; }
 .job-facts { display: flex; flex-wrap: wrap; gap: 8px 13px; margin-top: 16px; color: var(--muted); font-size: 10px; }
-.job-facts span, .job-card-bottom > span { display: inline-flex; align-items: center; gap: 5px; }
+.job-facts span, .job-card-dates span { display: inline-flex; align-items: center; gap: 5px; }
 .job-card-bottom { margin-top: auto; border-top: 1px solid var(--line); padding-top: 12px; color: var(--muted); font-size: 10px; }
+.job-card-dates { display: grid; gap: 5px; }
+.job-card-dates svg { flex: 0 0 auto; }
 .job-card-bottom a { display: grid; width: 28px; height: 28px; place-items: center; border-radius: 4px; color: var(--brand); }
 .job-card-bottom a:hover { background: var(--brand-soft); }
 .results-meta { display: flex; justify-content: space-between; color: var(--muted); font-size: 10px; }

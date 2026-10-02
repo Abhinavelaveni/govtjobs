@@ -140,7 +140,7 @@ function JobCard({ job, savedIds = [], onSave }) {
     <p className="job-org"><Building2 size={15} />{job.organization}</p>
     <div className="job-source-line"><span>Imported from</span>{job.source_url ? <a href={job.source_url} target="_blank" rel="noreferrer noopener">{job.source_name || 'Recruitment source'} <ExternalLink size={12} /></a> : <strong>{job.source_name || 'Manual entry'}</strong>}{job.source_tier && <Badge tone={job.source_tier === 'tier2' ? 'gold' : 'good'}>{job.source_tier === 'tier2' ? 'Tier 2 · Aggregator' : 'Tier 1 · Primary'}</Badge>}</div>
     <div className="job-facts"><span><MapPin size={14} />{job.location || 'Location in notice'}</span><span><BriefcaseBusiness size={14} />{job.category || 'Government role'}</span></div>
-    <div className="job-card-bottom"><span><CalendarDays size={14} />Closes {prettyDate(job.last_date)}</span><Link to={`/jobs/${job.id}`} aria-label={`View ${job.title}`}><ArrowRight size={18} /></Link></div>
+    <div className="job-card-bottom"><div className="job-card-dates"><span><CalendarDays size={14} />Closes {prettyDate(job.last_date)}</span><span><Clock3 size={14} />Updated {prettyDate(job.updated_at || job.created_at)}</span></div><Link to={`/jobs/${job.id}`} aria-label={`View ${job.title}`}><ArrowRight size={18} /></Link></div>
   </article>;
 }
 
@@ -403,6 +403,7 @@ function NotificationsPage({ adminMode = false }) {
   const path = adminMode ? `/admin/notifications?${new URLSearchParams({ ...(status && { status }), ...(search && { search }) })}` : '/notifications';
   const state = useLoad(path, !adminMode);
   const holdState = useLoad(adminMode ? '/admin/whatsapp/state' : null, true);
+  const configState = useLoad(adminMode ? '/admin/whatsapp/config' : null, true);
   const notify = useToast();
   const paused = pausedState ?? Boolean(holdState.data?.paused);
   const pausedRef = useRef(paused);
@@ -425,12 +426,12 @@ function NotificationsPage({ adminMode = false }) {
   }, [adminMode]);
   const latestNotification = state.data?.[0];
   useEffect(() => {
-    if (!adminMode || state.loading || state.error || holdState.loading || holdState.error || paused || queueRunRef.current) return;
+    if (!adminMode || state.loading || state.error || holdState.loading || holdState.error || configState.loading || configState.error || paused || queueRunRef.current) return;
     const pending = (state.data || []).filter(item => ['Queued', 'Pending', 'Retrying'].includes(item.status));
     const now = Date.now();
     for (const [number, until] of blockedUntilRef.current) if (until <= now) blockedUntilRef.current.delete(number);
     if (!pending.some(item => (blockedUntilRef.current.get(item.whatsapp) || 0) <= now)) return;
-    if (!waCfg().key) {
+    if (!configState.data?.keyConfigured) {
       if (!missingKeyWarningRef.current) notify('Set the WhatsApp API key in WhatsApp settings to enable automatic sending.', 'error');
       missingKeyWarningRef.current = true;
       return;
@@ -500,7 +501,7 @@ function NotificationsPage({ adminMode = false }) {
       }
     };
     void runQueue();
-  }, [adminMode, state.data, state.loading, state.error, holdState.loading, holdState.error, paused]);
+  }, [adminMode, state.data, state.loading, state.error, holdState.loading, holdState.error, configState.data, configState.loading, configState.error, paused]);
   const retry = async id => {
     try { await api(`/admin/notifications/${id}/retry`, 'POST'); state.reload(); notify('Notification returned to the send queue.'); }
     catch (error) { notify(error.message, 'error'); }
@@ -767,22 +768,45 @@ function TemplatesPage() {
 
 function WhatsAppSettingsPage() {
   const notify = useToast();
-  const [form, setForm] = useState(waCfg);
+  const state = useLoad('/admin/whatsapp/config');
+  const [form, setForm] = useState(() => ({ ...waCfg(), key: '' }));
+  const [keyConfigured, setKeyConfigured] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [phoneNumber, setPhoneNumber] = useState('');
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState('');
-  const save = () => { saveWaCfg(form); setForm(waCfg()); notify('WhatsApp settings saved in this browser.'); };
+  useEffect(() => {
+    if (!state.data) return;
+    setKeyConfigured(state.data.keyConfigured);
+    const legacy = waCfg();
+    setForm({
+      url: state.data.keyConfigured ? state.data.url : legacy.url,
+      sessionId: state.data.keyConfigured ? state.data.sessionId : legacy.sessionId,
+      tpl: state.data.keyConfigured ? state.data.tpl : legacy.tpl,
+      key: state.data.keyConfigured ? '' : legacy.key
+    });
+  }, [state.data]);
+  const save = async () => {
+    setSaving(true);
+    try {
+      const result = await saveWaCfg(form);
+      setKeyConfigured(result.keyConfigured);
+      setForm(current => ({ ...current, key: '' }));
+      notify('WhatsApp settings saved for all admin devices.');
+    } catch (error) { notify(error.message, 'error'); }
+    finally { setSaving(false); }
+  };
   const test = async () => {
     setTesting(true); setTestResult('');
-    try { const result = await testWhatsApp(form, phoneNumber); setTestResult(result); notify('Test message accepted.'); }
+    try { const result = await testWhatsApp(phoneNumber); setTestResult(result); notify('Test message accepted.'); }
     catch (error) { setTestResult(error.message); notify(error.message, 'error'); }
     finally { setTesting(false); }
   };
   const field = (label, key, type = 'text', help = '') => <label>{label}<input className={inputClass} type={type} value={form[key] || ''} onChange={event => setForm({ ...form, [key]: event.target.value })} />{help && <small>{help}</small>}</label>;
   return <div className="page-stack"><PageHeader eyebrow="Administration" title="WhatsApp connection" description="Configure the provider used to send opted-in notifications." />
-    <div className="whatsapp-layout"><section className="settings-section"><div className="callout-warning"><ShieldCheck size={18} /><p>The API key is kept in this browser session and sent to the application server only when you test or send a message. Use a trusted administrator device.</p></div><div className="settings-fields">{field('API base URL', 'url', 'url', 'Use waapi.hybridnet.in; a base path or full send-text endpoint is accepted.')}{field('Session ID', 'sessionId')}{field('API key', 'key', 'password', 'Kept in session storage and cleared when this browser session ends.')}{field('Default template ID', 'tpl')}</div><button className={buttonClass} onClick={save}><Check size={16} />Save WhatsApp settings</button></section>
-      <section className="settings-section test-panel"><SectionHeading title="Send a test message" detail="This sends a real message from the configured WhatsApp session." /><label>Recipient mobile<input className={inputClass} type="tel" inputMode="numeric" maxLength={10} value={phoneNumber} onChange={event => setPhoneNumber(event.target.value)} placeholder="10-digit Indian mobile" /></label><button className={mutedButtonClass} disabled={testing} onClick={test}><Send size={16} />{testing ? 'Sending test…' : 'Send test message'}</button>{testResult && <p className={/error|http|hold|failed/i.test(testResult) ? 'form-error' : 'helper-note'}>{testResult}</p>}<p className="helper-note">Requests are proxied through the authenticated application server. Confirm the WhatsApp session is online and the recipient number is valid.</p></section>
-    </div>
+    {state.error ? <ErrorState message={state.error} retry={state.reload} /> : <div className="whatsapp-layout"><section className="settings-section"><div className="callout-warning"><ShieldCheck size={18} /><p>WhatsApp settings are stored on the application server and shared across admin devices. The API key is never returned after saving.</p></div><div className="settings-fields">{field('API base URL', 'url', 'url', 'Use waapi.hybridnet.in; a base path or full send-text endpoint is accepted.')}{field('Session ID', 'sessionId')}{field('API key', 'key', 'password', keyConfigured ? 'Leave blank to keep the saved API key.' : 'Enter the API key to connect this WhatsApp session.')}{field('Default template ID', 'tpl')}</div><button className={buttonClass} disabled={saving || state.loading} onClick={save}><Check size={16} />{saving ? 'Saving…' : 'Save WhatsApp settings'}</button></section>
+      <section className="settings-section test-panel"><SectionHeading title="Send a test message" detail="This sends a real message from the configured WhatsApp session." /><label>Recipient mobile<input className={inputClass} type="tel" inputMode="numeric" maxLength={10} value={phoneNumber} onChange={event => setPhoneNumber(event.target.value)} placeholder="10-digit Indian mobile" /></label><button className={mutedButtonClass} disabled={testing || !keyConfigured} onClick={test}><Send size={16} />{testing ? 'Sending test…' : 'Send test message'}</button>{testResult && <p className={/error|http|hold|failed/i.test(testResult) ? 'form-error' : 'helper-note'}>{testResult}</p>}<p className="helper-note">Requests are proxied through the authenticated application server. Confirm the WhatsApp session is online and the recipient number is valid.</p></section>
+    </div>}
   </div>;
 }
 

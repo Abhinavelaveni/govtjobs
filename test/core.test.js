@@ -2,8 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { matches, normalizeForSearch, whatsappLimitReached } from '../src/matcher.js';
 import { render } from '../src/templates.js';
-import { api } from '../frontend/src/api.js';
+import { api, sendNotification, testWhatsApp } from '../frontend/src/api.js';
 import { PRESETS } from '../src/adapters/presets.js';
+import { parseEmploymentNewsJobs, parseGovtJobGuruListing, parseIbpsRecruitmentUpdates, parseRrbCenNotifications } from '../src/adapters/official.js';
 import { fingerprint } from '../src/scraper.js';
 import {
   parseFreeJobAlertArticle, parseFreeJobAlertListing, parseNtpcOpenAdvertisements,
@@ -18,6 +19,14 @@ test('source presets retain tier and authority metadata', () => {
   assert.equal(source('FreeJobAlert Telangana').config.sourceTier, 'tier2');
   assert.equal(source('Sahi Sarkari Jobs').config.sourceAuthority, 'aggregator');
   assert.equal(source('FreeJobAlert Telangana').enabled, false);
+  assert.equal(source('IBPS').adapter, 'ibps-updates');
+  assert.equal(source('Railway Recruitment Boards').adapter, 'rrb-notices');
+  assert.equal(source('Railway Recruitment Boards').url, 'https://rrb.indianrailways.gov.in/chandigarh');
+  assert.equal(source('Employment News').adapter, 'employment-news');
+  assert.equal(source('Employment News').url, 'https://employmentnews.gov.in/NewEmp/AllJobs.aspx?k=All');
+  assert.equal(source('GovtJobGuru').adapter, 'govtjobguru');
+  assert.equal(source('GovtJobGuru').enabled, true);
+  assert.equal(source('GovtJobGuru').config.sourceAuthority, 'aggregator');
 });
 test('normalizes accents and punctuation for search filters', () => {
   assert.equal(normalizeForSearch('B.Tech'), 'b tech');
@@ -57,6 +66,29 @@ test('API retries transient GET failures but never replays a POST', async () => 
   }
 });
 
+test('WhatsApp test and notification requests use server-side configuration', async () => {
+  const previousFetch = globalThis.fetch;
+  const previousStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  const calls = [];
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: () => 'admin-token' } });
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, status: 200, json: async () => ({ response: 'accepted' }) };
+  };
+  try {
+    await testWhatsApp('9876543210');
+    await sendNotification({ id: 42, whatsapp: '9876543210' });
+    assert.equal(calls[0].url, '/api/admin/whatsapp/test');
+    assert.deepEqual(JSON.parse(calls[0].options.body), { phone: '9876543210' });
+    assert.equal(calls[1].url, '/api/admin/notifications/42/send');
+    assert.equal(calls[1].options.body, undefined);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousStorage) Object.defineProperty(globalThis, 'localStorage', previousStorage);
+    else delete globalThis.localStorage;
+  }
+});
+
 test('matches eligible user', () => assert.equal(matches(job, pref), true));
 test('accepts normalized qualification and keyword variants', () => {
   const normalizedJob = { title: 'Assistant Engineer', category: 'Engineering', gov_level: 'Central', qualification: ['B.Tech'], location: 'Maharashtra' };
@@ -80,6 +112,54 @@ test('fingerprint stable and case-insensitive', () => {
   const a = { organization: 'UPSC', notification_no: '1/2026', notification_url: 'https://a' };
   assert.equal(fingerprint(a), fingerprint({ ...a, organization: 'upsc' }));
   assert.notEqual(fingerprint(a), fingerprint({ ...a, notification_no: '2/2026' }));
+});
+test('fingerprint deduplicates the same notice across URL variants and sources', () => {
+  const officialNotice = { organization: 'UPSC', notification_no: 'Advt. 03/2026', notification_url: 'https://upsc.gov.in/notices/03.pdf' };
+  const mirroredNotice = { organization: 'UPSC', notification_no: 'Advt. 03/2026', notification_url: 'https://mirror.example/notice.pdf?source=feed' };
+  assert.equal(fingerprint(officialNotice), fingerprint(mirroredNotice));
+  assert.equal(
+    fingerprint({ organization: 'Railways', title: 'Assistant Recruitment', last_date: '2026-12-01', notification_url: 'https://board.example/a' }),
+    fingerprint({ organization: 'Railways', title: 'Assistant Recruitment', last_date: '2026-12-01', notification_url: 'https://mirror.example/b' })
+  );
+});
+test('IBPS updates keep recruitment notifications and skip exam outcomes', () => {
+  const html = `<table><tr><td>01 Jul 26</td><td><a href="/wp-content/uploads/CRP-PO-XVI.pdf">Notification for Common Recruitment Process for CRP- PO/MTs-XVI</a></td></tr><tr><td>01 Oct 26</td><td><a href="/index.php/clerical-cadre-xvi/">Online Preliminary Exam Call Letter for CRP-CSA-XVI</a></td></tr></table>`;
+  const jobs = parseIbpsRecruitmentUpdates(html, { url: 'https://www.ibps.in/index.php/crp-updates' });
+  assert.equal(jobs.length, 1);
+  assert.equal(jobs[0].notification_no, 'PO/MTs-XVI');
+  assert.equal(jobs[0].notification_url, 'https://www.ibps.in/wp-content/uploads/CRP-PO-XVI.pdf');
+  assert.equal(jobs[0].published_at, '2026-07-01');
+});
+test('Employment News imports live recruitment rows from its rendered jobs table', () => {
+  const html = `<table><tr><th>ISSUED DATE (MM/DD/YYYY)</th><th>ORGANISATION</th><th>POST</th><th>METHOD OF APPOINTMENT</th><th>LAST DATE (DD/MM/YYYY)</th></tr><tr><td>09/12/2026</td><td>Example Board</td><td>Assistant Engineer</td><td>Recruitment</td><td>31/12/2026</td></tr><tr><td>08/01/2026</td><td>Expired Board</td><td>Clerk</td><td>Recruitment</td><td>30/09/2026</td></tr><tr><td>09/15/2026</td><td>Forest Department</td><td>Consultant</td><td>Deputation</td><td>18/10/2026</td></tr></table>`;
+  const source = { url: 'https://employmentnews.gov.in/NewEmp/AllJobs.aspx?k=All' };
+  const jobs = parseEmploymentNewsJobs(html, source, new Date('2026-10-02T00:00:00Z'));
+  assert.equal(jobs.length, 2);
+  assert.equal(jobs[0].published_at, '2026-09-12');
+  assert.equal(jobs[0].last_date, '2026-12-31');
+  assert.equal(jobs[0].notification_url, source.url);
+});
+test('RRB notifications use official CEN PDFs and skip corrigenda', () => {
+  const html = `<table class="cnp_list"><tbody><tr><td>1</td><td>03/2026</td><td>Notification</td><td>Corrigendum on revised suitability</td><td>10-08-2026</td><td><select><option value="/-/image/corrigendum.pdf/examsDocuments">English</option></select></td></tr><tr><td>2</td><td>03/2026</td><td>Notification</td><td>CLICK HERE TO VIEW THE DETAILED CENTRALISED EMPLOYMENT NOTIFICATION FOR CEN 03/2026 SECTION CONTROLLER (HINDI)</td><td>15-07-2026</td><td></td></tr><tr><td>3</td><td>03/2026</td><td>Notification</td><td>Detailed Centralised Employment Notification</td><td>15-07-2026</td><td><select><option value="">Select Language</option><option value="/-/image/FINAL_CEN_03_2026_SECTION_CONTROLLER.pdf/examsDocuments">English</option><option value="/-/image/FINAL_CEN_03_2026_SECTION_CONTROLLER_HINDI.pdf/examsDocuments">Hindi</option></select></td></tr><tr><td>4</td><td>04/2026</td><td>Notification</td><td>Detailed Centralized Employment Notification</td><td>20-08-2026</td><td><select><option value="/-/image/1755682548904CEN_04_2026_JE_DMS_English.pdf/examsDocuments">English</option></select></td></tr></tbody></table>`;
+  const source = { url: 'https://rrb.indianrailways.gov.in/chandigarh', config: { sourcePage: 'https://rrb.indianrailways.gov.in/chandigarh' } };
+  const jobs = parseRrbCenNotifications(html, source, new Date('2026-10-02T00:00:00Z'));
+  assert.equal(jobs.length, 2);
+  assert.equal(jobs[0].title, 'SECTION CONTROLLER (CEN 03/2026)');
+  assert.equal(jobs[0].notification_no, '03/2026');
+  assert.equal(jobs[0].notification_url, 'https://rrb.indianrailways.gov.in/-/image/FINAL_CEN_03_2026_SECTION_CONTROLLER.pdf/examsDocuments');
+  assert.equal(jobs[0].published_at, '2026-07-15');
+  assert.equal(jobs[1].title, 'JE DMS (CEN 04/2026)');
+});
+test('GovtJobGuru imports active table entries with their direct notice links', () => {
+  const html = `<h2>Bank Jobs</h2><table><tr><th>Organization</th><th>Posts</th><th>Post Name</th><th>Qualification</th><th>Deadline</th><th>Details</th></tr><tr><td>SBI</td><td>4</td><td>Specialist Cadre Officer</td><td>MBA/PGDM, Any Bachelors Degree</td><td>21-10-26 (20 days left)</td><td><a href="https://sbi.bank.in/documents/notice.pdf">Detail</a></td></tr><tr><td>Old Bank</td><td>2</td><td>Expired Clerk</td><td>Graduate</td><td>30-09-26 (Expired)</td><td><a href="https://oldbank.gov.in/notice.pdf">Detail</a></td></tr><tr><td>Another Bank</td><td>1</td><td>Assistant</td><td>Graduate</td><td>Update Soon</td><td><a href="https://anotherbank.in/notice">Detail</a></td></tr></table>`;
+  const jobs = parseGovtJobGuruListing(html, { url: 'https://govtjobguru.in/government-jobs-openings/' }, new Date('2026-10-02T00:00:00Z'));
+  assert.equal(jobs.length, 2);
+  assert.equal(jobs[0].title, 'Specialist Cadre Officer');
+  assert.equal(jobs[0].vacancies, 4);
+  assert.deepEqual(jobs[0].qualification, ['MBA/PGDM', 'Any Bachelors Degree']);
+  assert.equal(jobs[0].last_date, '2026-10-21');
+  assert.equal(jobs[0].notification_url, 'https://sbi.bank.in/documents/notice.pdf');
+  assert.equal(jobs[1].last_date, null);
 });
 test('SBI parser keeps live official openings and their verified links', () => {
   const html = `<div class="card"><div class="accordion"><div class="row"><div><p>RECRUITMENT OF ASSISTANT MANAGER (Apply Online from 01.01.2099 to 31.12.2099)</p><p>ADVERTISEMENT NO: CRPD/TEST/2099/01</p></div><button>LAST DATE TO APPLY : 31-12-2099</button></div></div><div class="accordion-content"><a href="/documents/notice.pdf">English (PDF)</a><a href="https://recruitment.sbi.bank.in/test/apply">APPLY ONLINE</a></div></div>`;

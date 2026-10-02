@@ -42,6 +42,17 @@ const positiveId = value => Number.isSafeInteger(Number(value)) && Number(value)
 const safeUrl = value => {
   try { return ['http:', 'https:'].includes(new URL(value).protocol); } catch { return false; }
 };
+const whatsappDefaults = {
+  url: 'https://waapi.hybridnet.in/api/v1/sessions',
+  sessionId: '050fe2b6-483f-4b89-b3f1-fde2602a22d0',
+  tpl: 'government_job_alert'
+};
+const publicWhatsAppConfig = config => ({
+  url: config?.url || whatsappDefaults.url,
+  sessionId: config?.sessionId || whatsappDefaults.sessionId,
+  tpl: config?.tpl || config?.template_id || whatsappDefaults.tpl,
+  keyConfigured: Boolean(config?.key)
+});
 async function requestWhatsApp(config, phoneNumber, message) {
   const whatsappConfig = await collection('whatsapp_config').findOne({ id: 1 }, { projection: { paused: 1 } });
   if (whatsappConfig?.paused) throw Object.assign(new Error('WhatsApp is on hold by an administrator'), { status: 423 });
@@ -160,6 +171,7 @@ async function writeJob(body, id = null) {
   data.source_id = positiveId(input.source_id);
   data.verified = Boolean(input.verified);
   data.featured = Boolean(input.featured);
+  data.updated_at = new Date();
 
   if (id) {
     await collection('jobs').updateOne({ id }, { $set: data });
@@ -167,7 +179,7 @@ async function writeJob(body, id = null) {
     data.fingerprint = fingerprint(data);
     id = await nextId('jobs');
     data.id = id;
-    data.created_at = new Date();
+    data.created_at = data.updated_at;
     await collection('jobs').insertOne(data);
   }
   const job = publicDoc(await collection('jobs').findOne({ id }));
@@ -317,12 +329,12 @@ app.put('/api/admin/jobs/:id', admins, wrap(async (req, res) => {
 }));
 app.put('/api/admin/jobs/:id/verify', admins, wrap(async (req, res) => {
   const id = positiveId(req.params.id) || 0;
-  await collection('jobs').updateOne({ id }, { $set: { verified: Boolean(req.body.verified) } });
+  await collection('jobs').updateOne({ id }, { $set: { verified: Boolean(req.body.verified), updated_at: new Date() } });
   res.json({ ok: true });
 }));
 app.put('/api/admin/jobs/:id/feature', admins, wrap(async (req, res) => {
   const id = positiveId(req.params.id) || 0;
-  await collection('jobs').updateOne({ id }, { $set: { featured: Boolean(req.body.featured) } });
+  await collection('jobs').updateOne({ id }, { $set: { featured: Boolean(req.body.featured), updated_at: new Date() } });
   res.json({ ok: true });
 }));
 app.delete('/api/admin/jobs/:id', admins, wrap(async (req, res) => {
@@ -472,7 +484,8 @@ app.post('/api/admin/notifications/:id/send', admins, wrap(async (req, res) => {
   if (!claimed.modifiedCount) return res.status(409).json({ error: 'Notification is already being sent' });
   let result;
   try {
-    result = await requestWhatsApp(req.body, notification.whatsapp, notification.message);
+    const config = await collection('whatsapp_config').findOne({ id: 1 });
+    result = await requestWhatsApp(config || {}, notification.whatsapp, notification.message);
   } catch (error) {
     result = { accepted: false, limitHit: false, statusCode: error.status, response: '', error: error.message };
   }
@@ -494,11 +507,34 @@ app.put('/api/admin/whatsapp/state', admins, wrap(async (req, res) => {
   await collection('whatsapp_config').updateOne({ id: 1 }, { $set: { paused, updated_at: new Date() } }, { upsert: true });
   res.json({ paused });
 }));
+app.get('/api/admin/whatsapp/config', admins, wrap(async (_, res) => {
+  const config = await collection('whatsapp_config').findOne({ id: 1 });
+  res.json(publicWhatsAppConfig(config));
+}));
+app.put('/api/admin/whatsapp/config', admins, wrap(async (req, res) => {
+  const url = String(req.body.url || '').trim().replace(/\/$/, '');
+  const sessionId = String(req.body.sessionId || '').trim();
+  const tpl = String(req.body.tpl || '').trim();
+  const key = String(req.body.key || '').trim();
+  const existing = await collection('whatsapp_config').findOne({ id: 1 });
+  if (!url || !sessionId || !tpl) return res.status(400).json({ error: 'API URL, session ID, and template ID are required' });
+  let providerUrl;
+  try { providerUrl = new URL(url); } catch { return res.status(400).json({ error: 'Enter a valid WhatsApp API URL' }); }
+  if (providerUrl.protocol !== 'https:' || providerUrl.hostname !== 'waapi.hybridnet.in' || providerUrl.port) {
+    return res.status(400).json({ error: 'WhatsApp API URL must use https://waapi.hybridnet.in' });
+  }
+  if (!key && !existing?.key) return res.status(400).json({ error: 'Enter the WhatsApp API key' });
+  const changes = { url, sessionId, tpl, template_id: tpl, updated_at: new Date() };
+  if (key) changes.key = key;
+  await collection('whatsapp_config').updateOne({ id: 1 }, { $set: changes }, { upsert: true });
+  res.json(publicWhatsAppConfig({ ...existing, ...changes, key: key || existing?.key }));
+}));
 app.post('/api/admin/whatsapp/test', admins, wrap(async (req, res) => {
   const phoneNumber = String(req.body.phone || '').replace(/\D/g, '').slice(-10);
   if (!phone(phoneNumber)) return res.status(400).json({ error: 'Enter a valid 10-digit Indian mobile number' });
+  const config = await collection('whatsapp_config').findOne({ id: 1 });
   let result;
-  try { result = await requestWhatsApp(req.body, phoneNumber, 'GovJobs Alerts test message. WhatsApp connection is working.'); }
+  try { result = await requestWhatsApp(config || {}, phoneNumber, 'GovJobs Alerts test message. WhatsApp connection is working.'); }
   catch (error) { return res.status(error.status || 502).json({ error: error.message }); }
   if (!result.accepted) return res.status(result.limitHit ? 429 : 502).json({ error: result.error || 'WhatsApp test failed' });
   res.json({ response: result.response || 'Test message accepted by the WhatsApp API.' });

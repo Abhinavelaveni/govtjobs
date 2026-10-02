@@ -33,11 +33,11 @@ export const waCfg = () => ({
   tpl: localStorage.getItem('wa_tpl') || 'government_job_alert',
   key: sessionStorage.getItem('wa_key') || ''
 });
-export const saveWaCfg = config => {
-  localStorage.setItem('wa_api_url', config.url.trim().replace(/\/$/, ''));
-  localStorage.setItem('wa_session_id', config.sessionId.trim());
-  localStorage.setItem('wa_tpl', config.tpl.trim());
-  sessionStorage.setItem('wa_key', config.key.trim());
+export const saveWaCfg = async config => {
+  const result = await api('/admin/whatsapp/config', 'PUT', config);
+  for (const key of ['wa_api_url', 'wa_session_id', 'wa_tpl']) localStorage.removeItem(key);
+  sessionStorage.removeItem('wa_key');
+  return result;
 };
 export const buildUrl = (config, phone, message) => {
   const endpoint = `${config.url.replace(/\/$/, '')}/${encodeURIComponent(config.sessionId)}/messages/send-text`;
@@ -45,17 +45,15 @@ export const buildUrl = (config, phone, message) => {
   url.search = new URLSearchParams({ apikey: config.key, receiver: `91${phone}`, message, template: config.tpl }).toString();
   return url.toString();
 };
-export async function testWhatsApp(config, phone) {
-  if (!config.key) throw new Error('Enter the API key first');
+export async function testWhatsApp(phone) {
   if (!/^[6-9]\d{9}$/.test(phone || '')) throw new Error('Enter a valid 10-digit Indian mobile number');
-  const result = await api('/admin/whatsapp/test', 'POST', { ...config, phone });
+  const result = await api('/admin/whatsapp/test', 'POST', { phone });
   return result.response || 'Test message accepted by the WhatsApp API.';
 }
 export async function sendNotification(n) {
-  const c = waCfg(); if (!c.key) throw new Error('Set the API key in WhatsApp settings first');
   if (!/^[6-9]\d{9}$/.test(n.whatsapp)) {
     await api(`/notifications/${n.id}/status`, 'PUT', { status: 'Failed', error: 'Invalid mobile number' });
     throw new Error(`Notification ${n.id} has an invalid mobile number`);
   }
-  await api(`/admin/notifications/${n.id}/send`, 'POST', c);
+  await api(`/admin/notifications/${n.id}/send`, 'POST');
 }
