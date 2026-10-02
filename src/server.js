@@ -93,12 +93,12 @@ async function processWhatsAppQueue() {
   try {
     const now = new Date();
     const config = await collection('whatsapp_config').findOne({ id: 1 });
-    if (config?.paused || !config?.key || !config?.sessionId) return;
-
     await collection('notifications').updateMany(
       { status: 'Sending', $or: [{ sending_at: { $lt: new Date(now.getTime() - 5 * 60 * 1000) } }, { sending_at: { $exists: false } }] },
       { $set: { status: 'Queued', retryable: true, next_attempt_at: now, error: 'Recovered an interrupted send; it will be retried.' }, $unset: { sending_at: '' } }
     );
+    if (config?.paused || !config?.key || !config?.sessionId) return;
+
     const due = await collection('notifications').find({
       $and: [
         { $or: [{ status: { $in: ['Queued', 'Pending', 'Retrying'] } }, { status: 'Failed', retryable: true }] },
@@ -380,7 +380,11 @@ app.put('/api/notifications/:id/status', auth, wrap(async (req, res) => {
   const id = positiveId(req.params.id);
   const notification = await collection('notifications').findOne({ id: id || 0, ...(req.user.role === 'admin' ? {} : { user_id: req.user.id }) });
   if (!notification) return res.status(404).json({ error: 'Notification not found' });
-  await collection('notifications').updateOne({ id }, { $set: { status, api_response: String(req.body.response || '').slice(0, 2000), error: String(req.body.error || '').slice(0, 500), ...(status === 'Sent' ? { sent_at: new Date() } : {}) } });
+  await collection('notifications').updateOne({ id }, { $set: {
+    status, api_response: String(req.body.response || '').slice(0, 2000), error: String(req.body.error || '').slice(0, 500),
+    ...(status === 'Sent' ? { sent_at: new Date() } : {}),
+    ...(status === 'Failed' ? { retryable: false, next_attempt_at: null } : {})
+  } });
   await collection('notification_logs').insertOne({ id: await nextId('notification_logs'), notification_id: id, status, detail: String(req.body.error || req.body.response || '').slice(0, 2000), at: new Date() });
   res.json({ ok: true });
 }));
@@ -594,9 +598,10 @@ app.put('/api/admin/whatsapp/config', admins, wrap(async (req, res) => {
 app.post('/api/admin/whatsapp/test', admins, wrap(async (req, res) => {
   const phoneNumber = String(req.body.phone || '').replace(/\D/g, '').slice(-10);
   if (!phone(phoneNumber)) return res.status(400).json({ error: 'Enter a valid 10-digit Indian mobile number' });
+  const config = await collection('whatsapp_config').findOne({ id: 1 });
+  if (!config?.key || !config?.sessionId) return res.status(400).json({ error: 'WhatsApp API key and session ID are required' });
   const slot = await reserveWhatsAppSlot(collection('whatsapp_rate_limits'), phoneNumber, new Date());
   if (!slot.reserved) return res.status(429).json({ error: `Contact rate limit reached; next send is available at ${slot.nextAt.toISOString()}` });
-  const config = await collection('whatsapp_config').findOne({ id: 1 });
   let result;
   try { result = await requestWhatsApp(config || {}, phoneNumber, 'GovJobs Alerts test message. WhatsApp connection is working.'); }
   catch (error) { return res.status(error.status || 502).json({ error: error.message }); }
