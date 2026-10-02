@@ -87,6 +87,10 @@ async function requestWhatsApp(config, phoneNumber, message) {
 }
 
 let whatsappQueueRunning = false;
+function wakeWhatsAppQueue() {
+  setImmediate(() => void processWhatsAppQueue());
+}
+
 async function processWhatsAppQueue() {
   if (whatsappQueueRunning) return;
   whatsappQueueRunning = true;
@@ -101,7 +105,7 @@ async function processWhatsAppQueue() {
 
     const due = await collection('notifications').find({
       $and: [
-        { $or: [{ status: { $in: ['Queued', 'Pending', 'Retrying'] } }, { status: 'Failed', retryable: true }] },
+        { $or: [{ status: { $in: ['Queued', 'Pending', 'Retrying'] } }, { status: 'Failed', retryable: { $ne: false } }] },
         { $or: [{ next_attempt_at: { $exists: false } }, { next_attempt_at: null }, { next_attempt_at: { $lte: now } }] }
       ]
     }).sort({ created_at: 1, id: 1 }).limit(100).toArray();
@@ -265,7 +269,10 @@ async function writeJob(body, id = null) {
   }
   const job = publicDoc(await collection('jobs').findOne({ id }));
   if (!job) throw Object.assign(new Error('Job not found'), { status: 404 });
-  if (!body.id) await queueForJob(job, job.organization);
+  if (!body.id) {
+    await queueForJob(job, job.organization);
+    wakeWhatsAppQueue();
+  }
   return job;
 }
 
@@ -532,7 +539,11 @@ app.get('/api/admin/scrapers', admins, wrap(async (_, res) => {
       duplicates: latest?.duplicates, errors: latest?.errors, log: latest?.log };
   })));
 }));
-app.post('/api/admin/sources/:id/scrape', admins, wrap(async (req, res) => res.json(await runSource(positiveId(req.params.id) || 0))));
+app.post('/api/admin/sources/:id/scrape', admins, wrap(async (req, res) => {
+  const result = await runSource(positiveId(req.params.id) || 0);
+  wakeWhatsAppQueue();
+  res.json(result);
+}));
 
 app.get('/api/admin/notifications', admins, wrap(async (req, res) => {
   const status = req.query.status;
@@ -553,6 +564,7 @@ app.post('/api/admin/notifications/:id/retry', admins, wrap(async (req, res) => 
     { $set: { status: 'Queued', retryable: true, next_attempt_at: new Date(), error: '' } }
   );
   if (!result.modifiedCount) return res.status(409).json({ error: 'Notification is not failed or is already being processed' });
+  wakeWhatsAppQueue();
   res.json({ ok: true });
 }));
 app.post('/api/admin/notifications/:id/send', admins, wrap(async (req, res) => {
@@ -562,6 +574,7 @@ app.post('/api/admin/notifications/:id/send', admins, wrap(async (req, res) => {
     { $set: { status: 'Queued', retryable: true, next_attempt_at: new Date(), error: '' } }
   );
   if (!queued.modifiedCount) return res.status(409).json({ error: 'Notification is no longer queued' });
+  wakeWhatsAppQueue();
   res.status(202).json({ status: 'Queued' });
 }));
 app.get('/api/admin/whatsapp/state', admins, wrap(async (_, res) => {
@@ -571,6 +584,7 @@ app.get('/api/admin/whatsapp/state', admins, wrap(async (_, res) => {
 app.put('/api/admin/whatsapp/state', admins, wrap(async (req, res) => {
   const paused = Boolean(req.body.paused);
   await collection('whatsapp_config').updateOne({ id: 1 }, { $set: { paused, updated_at: new Date() } }, { upsert: true });
+  if (!paused) wakeWhatsAppQueue();
   res.json({ paused });
 }));
 app.get('/api/admin/whatsapp/config', admins, wrap(async (_, res) => {
@@ -593,6 +607,7 @@ app.put('/api/admin/whatsapp/config', admins, wrap(async (req, res) => {
   const changes = { url, sessionId, tpl, template_id: tpl, updated_at: new Date() };
   if (key) changes.key = key;
   await collection('whatsapp_config').updateOne({ id: 1 }, { $set: changes }, { upsert: true });
+  wakeWhatsAppQueue();
   res.json(publicWhatsAppConfig({ ...existing, ...changes, key: key || existing?.key }));
 }));
 app.post('/api/admin/whatsapp/test', admins, wrap(async (req, res) => {
@@ -651,7 +666,9 @@ async function schedule() {
   task?.stop();
   const setting = await collection('settings').findOne({ key: 'scrape_interval_min' });
   const minutes = Math.max(5, Math.min(59, Number(setting?.value) || 30));
-  task = cron.schedule(`*/${minutes} * * * *`, () => runAll().catch(error => console.error('scheduled scrape failed', error)));
+  task = cron.schedule(`*/${minutes} * * * *`, () => runAll()
+    .then(wakeWhatsAppQueue)
+    .catch(error => console.error('scheduled scrape failed', error)));
 }
 
 process.on('unhandledRejection', error => console.error('unhandled rejection', error));
